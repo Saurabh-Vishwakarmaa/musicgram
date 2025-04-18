@@ -1,2 +1,2 @@
 flutter/ephemeral
-lib/configs
+**/lib/configs
