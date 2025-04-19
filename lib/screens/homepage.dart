@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'package:appwrite/appwrite.dart';
 import 'package:flutter/material.dart';
-import 'package:audioplayers/audioplayers.dart';
-import 'package:just_audio/just_audio.dart' as just_audio;
+import 'package:flutter/services.dart';
 import 'package:musicgram4/configs/appwritecongif.dart';
+import 'package:musicgram4/notifications/media_notifications.dart';
+import 'package:musicgram4/services/audio_player_service.dart';
 import 'package:musicgram4/screens/expandedplayer.dart';
 import 'package:musicgram4/screens/librarypage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +14,7 @@ import 'package:musicgram4/screens/searchpage.dart';
 import 'package:musicgram4/main.dart'; // Import for global Appwrite instances
 import 'homie.dart';
 
+
 class MainScreen extends StatefulWidget {
   @override
   _MainScreenState createState() => _MainScreenState();
@@ -21,8 +23,7 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   final PageController _pageController = PageController();
   int _currentPage = 0;
-  final AudioPlayer _audioPlayer = AudioPlayer();
-  final just_audio.AudioPlayer _justAudioPlayer = just_audio.AudioPlayer();
+  final AudioPlayerService _audioService = AudioPlayerService();
   Duration _songDuration = Duration.zero;
   Duration _currentPosition = Duration.zero;
   Album? _currentlyPlaying;
@@ -38,99 +39,57 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // Initialize the audio service
+    _audioService.init();
+    
     _fetchAllAlbums().then((_) {
       setState(() {
         _pages.add(HomePage(onPlaySong: _playSong));
         _pages.add(SearchPage(albums: _allAlbums));
         _pages.add(ProfilePage());
         _pages.add(RewardsPage());
-        // _pages.add(DashboardPage());
       });
     });
 
-    // Set up audioplayers listeners
-    _audioPlayer.onDurationChanged.listen((Duration duration) {
+    // Set up audio service callbacks
+    _audioService.onPlayPause = () {
       setState(() {
-        _songDuration = duration;
+        _isPlaying = _audioService.isPlaying;
       });
-      print("Duration changed: $duration");
-    });
-
-    _audioPlayer.onPositionChanged.listen((Duration position) {
+      
+      if (_isPlaying) {
+        _startListeningTimer();
+      } else {
+        _stopListeningTimer();
+      }
+    };
+    
+    _audioService.onPositionChanged = (position) {
       setState(() {
         _currentPosition = position;
       });
-    });
-
-    _audioPlayer.onPlayerStateChanged.listen((PlayerState state) {
-      print("Player state changed: $state");
-      
-      // Handle player completion
-      if (state == PlayerState.completed) {
-        setState(() {
-          _isPlaying = false;
-        });
-        _stopListeningTimer();
-      }
-    });
+    };
     
-    _audioPlayer.onPlayerComplete.listen((_) {
-      print("Player playback completed");
-    });
-
-    // Set up just_audio listeners
-    _justAudioPlayer.durationStream.listen((duration) {
+    _audioService.onDurationChanged = (duration) {
       if (duration != null) {
         setState(() {
           _songDuration = duration;
         });
-        print("just_audio duration: $duration");
       }
-    });
-
-    _justAudioPlayer.positionStream.listen((position) {
-      setState(() {
-        _currentPosition = position;
-      });
-    });
-
-    _justAudioPlayer.playerStateStream.listen((state) {
-      print("just_audio state: ${state.processingState}, playing: ${state.playing}");
-      
-      if (state.processingState == just_audio.ProcessingState.completed) {
-        setState(() {
-          _isPlaying = false;
-        });
-        _stopListeningTimer();
-      }
-    });
-
+    };
+    
+    _audioService.onComplete = _playNextSong;
+    _audioService.onNext = _playNextSong;
+    _audioService.onPrevious = _playPreviousSong;
+    
+    // Load listening time
     _loadListeningTime();
   }
-  void _playNextSong() {
-  if (_currentQueue.isEmpty || _currentIndex >= _currentQueue.length - 1) {
-    print("No next song in queue");
-    return;
-  }
-  
-  _currentIndex++;
-  _playSong(_currentQueue[_currentIndex]);
-}
-
-void _playPreviousSong() {
-  if (_currentQueue.isEmpty || _currentIndex <= 0) {
-    print("No previous song in queue");
-    return;
-  }
-  
-  _currentIndex--;
-  _playSong(_currentQueue[_currentIndex]);
-}
 
   @override
   void dispose() {
-    _audioPlayer.dispose();
-    _justAudioPlayer.dispose();
+    _audioService.dispose();
     _listeningTimer?.cancel();
     super.dispose();
   }
@@ -233,19 +192,16 @@ void _playPreviousSong() {
   }
 
   Future<void> _playSong(Album album) async {
-    await _audioPlayer.stop();
-    await _justAudioPlayer.stop();
-    
     print("Attempting to play song: ${album.name}");
-    print("Original URL: ${album.downloadUrl}");
-
-      if (_currentlyPlaying == null || album.name != _currentlyPlaying!.name) {
-    if (_allAlbums.isNotEmpty) {
-      _currentQueue = List.from(_allAlbums);
-      _currentIndex = _currentQueue.indexWhere((a) => a.name == album.name);
-      if (_currentIndex < 0) _currentIndex = 0; // Fallback
+    
+    // Update queue if needed
+    if (_currentlyPlaying == null || album.name != _currentlyPlaying!.name) {
+      if (_allAlbums.isNotEmpty) {
+        _currentQueue = List.from(_allAlbums);
+        _currentIndex = _currentQueue.indexWhere((a) => a.name == album.name);
+        if (_currentIndex < 0) _currentIndex = 0; // Fallback
+      }
     }
-  }
 
     setState(() {
       _currentlyPlaying = album;
@@ -255,81 +211,18 @@ void _playPreviousSong() {
     });
     
     try {
-      // Try with just_audio first (better for streaming)
-      print("Trying with just_audio player");
-      
-      // Add cache-busting to prevent potential caching issues
-      String cacheBuster = DateTime.now().millisecondsSinceEpoch.toString();
-      String playUrl = album.downloadUrl;
-      if (playUrl.contains('?')) {
-        playUrl += '&cache=$cacheBuster';
-      } else {
-        playUrl += '?cache=$cacheBuster';
-      }
-      
-      await _justAudioPlayer.setUrl(playUrl);
-      print("just_audio set URL successfully");
-
-       _justAudioPlayer.processingStateStream.listen((state) {
-      if (state == just_audio.ProcessingState.completed) {
-        _playNextSong();
-      }
-    });
-      
-      await _justAudioPlayer.play();
-      print("just_audio player started");
+      // Play through the single audio service
+      await _audioService.playSong(album);
       
       _startListeningTimer();
       
-      // Try to save recently played
-      try {
-        _saveToRecentlyPlayed(album);
-      } catch (e) {
-        print("Error saving recently played: $e");
-      }
+      // Save to recently played
+      _saveToRecentlyPlayed(album);
     } catch (e) {
-      print("Error playing with just_audio: $e");
-      
-      // Fall back to original audioplayers
-      try {
-        print("Falling back to audioplayers");
-        
-        // Force using download URL regardless of what's stored
-        String fileId = album.downloadUrl.split('/files/')[1].split('/')[0];
-        String downloadUrl = '${AppConfig.endpoint}/storage/buckets/${AppConfig.storageId}/files/$fileId/download?project=${AppConfig.projectId}';
-        
-        print("Using direct download URL: $downloadUrl");
-        
-        await _audioPlayer.setSourceUrl(downloadUrl);
-        print("Source URL set successfully");
-        
-        await _audioPlayer.resume();
-        print("Player resumed successfully");
-        
-        _startListeningTimer();
-      } catch (e) {
-        print("Error with first fallback: $e");
-        
-        // Last resort approach
-        try {
-          print("Trying last resort method...");
-          
-          // Try with additional parameters that might help
-          String cleanUrl = album.downloadUrl.split('?')[0];
-          if (cleanUrl.contains('/view')) {
-            cleanUrl = cleanUrl.replaceAll('/view', '/download');
-          }
-          cleanUrl += '?project=${AppConfig.projectId}&cache=${DateTime.now().millisecondsSinceEpoch}';
-          
-          print("Using clean URL: $cleanUrl");
-          _audioPlayer.play(UrlSource(cleanUrl));
-        } catch (e) {
-          print("All playback attempts failed: $e");
-          setState(() {
-            _isPlaying = false;
-          });
-        }
-      }
+      print("Error playing song: $e");
+      setState(() {
+        _isPlaying = false;
+      });
     }
   }
 
@@ -361,183 +254,348 @@ void _playPreviousSong() {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Container(
-        color: const Color.fromARGB(255, 124, 166, 231),
-        child: Stack(
-          children: [
-            PageView(
-              controller: _pageController,
-              onPageChanged: (int page) {
-                setState(() {
-                  _currentPage = page;
-                });
-              },
-              children: _pages,
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          // Main content with enhanced page transitions
+          PageView.builder(
+            controller: _pageController,
+            onPageChanged: (int page) {
+              setState(() {
+                _currentPage = page;
+              });
+              // Add haptic feedback for page changes
+              HapticFeedback.lightImpact();
+            },
+            itemCount: _pages.length,
+            itemBuilder: (context, index) {
+              // Apply subtle scale effect to non-active pages
+              return AnimatedScale(
+                scale: _currentPage == index ? 1.0 : 0.92,
+                duration: Duration(milliseconds: 200),
+                child: AnimatedOpacity(
+                  opacity: _currentPage == index ? 1.0 : 0.7,
+                  duration: Duration(milliseconds: 200),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(
+                      _currentPage == index ? 0 : 20
+                    ),
+                    child: _pages[index],
+                  ),
+                ),
+              );
+            },
+            // Custom physics for satisfying swipe experience
+            physics: const PageScrollPhysics(
+              parent: BouncingScrollPhysics(),
             ),
-          ],
-        ),
+          ),
+          
+          // Page name indicator at top
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 16,
+            left: 0,
+            right: 0,
+            child: AnimatedSwitcher(
+              duration: Duration(milliseconds: 200),
+              transitionBuilder: (Widget child, Animation<double> animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: Offset(0, -0.1),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                );
+              },
+              child: Text(
+                _getPageName(_currentPage),
+                key: ValueKey<int>(_currentPage),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: -0.5,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+          
+          // Subtle page indicator
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 60,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(_pages.length, (index) {
+                return AnimatedContainer(
+                  duration: Duration(milliseconds: 300),
+                  margin: EdgeInsets.symmetric(horizontal: 3),
+                  height: 4,
+                  width: _currentPage == index ? 20 : 8,
+                  decoration: BoxDecoration(
+                    color: _currentPage == index ? Colors.white : Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                );
+              }),
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (_currentlyPlaying != null) _buildMiniPlayer(),
-          BottomNavigationBar(
-            currentIndex: _currentPage,
-            onTap: (int index) {
-              setState(() {
-                _currentPage = index;
-                _pageController.jumpToPage(index);
-              });
-            },
-            items: [
-              BottomNavigationBarItem(
-                icon: Icon(Icons.home, color: Colors.black),
-                label: 'Home',
+          // Redesigned mini-player with gestures
+          if (_currentlyPlaying != null) _buildMinimalistMiniPlayer(),
+          
+          // Modern, clean bottom navigation
+          Container(
+            color: Colors.black,
+            padding: EdgeInsets.only(
+              top: 8, 
+              bottom: MediaQuery.of(context).padding.bottom > 0 
+                  ? MediaQuery.of(context).padding.bottom 
+                  : 8
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildNavItem(0, 'Home', Icons.home_outlined, Icons.home),
+                  _buildNavItem(1, 'Search', Icons.search_outlined, Icons.search),
+                  _buildNavItem(2, 'Profile', Icons.person_outline, Icons.person),
+                  _buildNavItem(3, 'Rewards', Icons.emoji_events_outlined, Icons.emoji_events),
+                  _buildNavItem(4, 'Library', Icons.library_music_outlined, Icons.library_music),
+                ],
               ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.search, color: Colors.black),
-                label: 'Search',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.person, color: Colors.black),
-                label: 'Profile',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.emoji_events, color: Colors.black),
-                label: 'Rewards',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.library_music, color: Colors.black),
-                label: 'Library',
-              ),
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildMiniPlayer() {
+  // Enhanced navigation item with animations and feedback
+  Widget _buildNavItem(int index, String label, IconData outlinedIcon, IconData filledIcon) {
+    final bool isSelected = _currentPage == index;
+    
+    return GestureDetector(
+      onTap: () {
+        if (_currentPage != index) {
+          HapticFeedback.selectionClick();
+          _pageController.animateToPage(
+            index,
+            duration: Duration(milliseconds: 400),
+            curve: Curves.easeOutCubic,
+          );
+        }
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Custom indicator line above icon
+          AnimatedContainer(
+            duration: Duration(milliseconds: 200),
+            width: 20,
+            height: 2,
+            margin: EdgeInsets.only(bottom: 6),
+            decoration: BoxDecoration(
+              color: isSelected ? Colors.white : Colors.transparent,
+              borderRadius: BorderRadius.circular(1),
+            ),
+          ),
+          
+          // Animated icon transition
+          AnimatedSwitcher(
+            duration: Duration(milliseconds: 200),
+            child: Icon(
+              isSelected ? filledIcon : outlinedIcon,
+              key: ValueKey(isSelected),
+              color: isSelected ? Colors.white : Colors.white38,
+              size: 22,
+            ),
+          ),
+          
+          SizedBox(height: 4),
+          
+          // Label text
+          Text(
+            label,
+            style: TextStyle(
+              color: isSelected ? Colors.white : Colors.white38,
+              fontSize: 11,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Get page name based on index
+  String _getPageName(int page) {
+    switch(page) {
+      case 0: return "Discover";
+      case 1: return "Search";
+      case 2: return "Profile";
+      case 3: return "Rewards";
+      case 4: return "Library";
+      default: return "MusicGram";
+    }
+  }
+
+  // Reimagined minimalist mini player
+  Widget _buildMinimalistMiniPlayer() {
     double progress = _songDuration.inSeconds > 0
         ? _currentPosition.inSeconds / _songDuration.inSeconds
         : 0.0;
-
+    progress = progress.clamp(0.0, 1.0);
+    
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => ExpandedMusicPlayer(
-              album: _currentlyPlaying!,
-              audioPlayer: _audioPlayer,
-              justAudioPlayer: _justAudioPlayer,
-              onNextSong: _playNextSong,
-              onPreviousSong: _playPreviousSong,
-              onTogglePlayPause: _togglePlayPause,
-              isPlaying: _isPlaying,
-            ),
-          ),
-        );
-      },
-      // Add horizontal swipe detection
+      onTap: _openExpandedPlayer,
       onHorizontalDragEnd: (details) {
-        if (details.primaryVelocity! > 0) {
-          // Swiped right - play previous
+        if (details.primaryVelocity! > 500) {
+          HapticFeedback.mediumImpact();
           _playPreviousSong();
-        } else if (details.primaryVelocity! < 0) {
-          // Swiped left - play next
+        } else if (details.primaryVelocity! < -500) {
+          HapticFeedback.mediumImpact();
           _playNextSong();
         }
       },
       child: Container(
-        height: 80,
-        margin: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        margin: EdgeInsets.fromLTRB(16, 8, 16, 12),
+        height: 70,
         decoration: BoxDecoration(
           color: Colors.grey[900],
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black26,
-              blurRadius: 4,
-              offset: Offset(0, 2),
-            ),
-          ],
+          borderRadius: BorderRadius.circular(12),
         ),
-        child: Row(
+        child: Stack(
           children: [
-            Padding(
-              padding: const EdgeInsets.all(8.0),
+            // Progress bar at the top of the mini player
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.network(
-                  _currentlyPlaying?.imageUrl ?? 'https://via.placeholder.com/64',
-                  width: 64,
-                  height: 64,
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
-                      width: 64,
-                      height: 64,
-                      color: Colors.grey[800],
-                      child: Icon(
-                        Icons.music_note,
-                        color: Colors.white,
-                      ),
-                    );
-                  },
+                borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 2,
+                  backgroundColor: Colors.white10,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                 ),
               ),
             ),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _currentlyPlaying?.name ?? 'Unknown',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
+            
+            // Main mini player content
+            Row(
+              children: [
+                // Album art with subtle animation when playing
+                Container(
+                  width: 50,
+                  height: 50,
+                  margin: EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black26,
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: _isPlaying
+                      ? AnimatedContainer(
+                          duration: Duration(milliseconds: 200),
+                          transform: Matrix4.identity()
+                            ..scale(_isPlaying ? 1.05 : 1.0),
+                          transformAlignment: Alignment.center,
+                          child: _buildMiniPlayerImage(),
+                        )
+                      : _buildMiniPlayerImage(),
+                  ),
+                ),
+                
+                // Song details with ellipsis
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          _currentlyPlaying?.name ?? 'Unknown',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Text(
+                              'Artist',
+                              style: TextStyle(
+                                color: Colors.white54,
+                                fontSize: 12,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                   ),
-                  Text(
-                    'Artist Name', // Replace with actual artist name if available
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
-                    ),
+                ),
+                
+                // Play/pause button
+                IconButton(
+                  icon: Icon(
+                    _isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
+                    size: 30,
                   ),
-                  SizedBox(height: 8),
-                  LinearProgressIndicator(
-                    value: progress,
-                    backgroundColor: Colors.white24,
-                    color: Colors.greenAccent,
-                  ),
-                ],
-              ),
-            ),
-            IconButton(
-              icon: Icon(
-                _isPlaying ? Icons.pause : Icons.play_arrow,
-                color: Colors.white,
-                size: 30,
-              ),
-              onPressed: _togglePlayPause,
-            ),
-            IconButton(
-              icon: Icon(Icons.skip_previous, color: Colors.white, size: 30),
-              onPressed: _playPreviousSong,
-            ),
-            IconButton(
-              icon: Icon(Icons.skip_next, color: Colors.white, size: 30),
-              onPressed: _playNextSong,
+                  onPressed: _togglePlayPause,
+                ),
+              ],
             ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildMiniPlayerImage() {
+    return Image.network(
+      _currentlyPlaying?.imageUrl ?? 'https://via.placeholder.com/64',
+      width: 64,
+      height: 64,
+      fit: BoxFit.cover,
+      errorBuilder: (context, error, stackTrace) {
+        return Container(
+          width: 64,
+          height: 64,
+          color: Colors.grey[800],
+          child: Icon(
+            Icons.music_note,
+            color: Colors.white,
+          ),
+        );
+      },
     );
   }
 
@@ -546,52 +604,74 @@ void _playPreviousSong() {
   }
 
   void _togglePlayPause() {
-  if (_isPlaying) {
-    // Store current position before pausing
-    final currentPos = _currentPosition;
-    
-    // Pause both players (only one will be active)
-    _audioPlayer.pause();
-    _justAudioPlayer.pause();
-    _stopListeningTimer();
-    
-    setState(() {
-      _isPlaying = false;
-      // Keep track of the position
-      _currentPosition = currentPos;
-    });
-  } else {
-    // Resume playback from stored position
-    if (_justAudioPlayer.processingState != just_audio.ProcessingState.idle) {
-      // First try to resume with just_audio
-      _justAudioPlayer.seek(_currentPosition);
-      _justAudioPlayer.play();
-      print("Resuming with just_audio from position: $_currentPosition");
+    if (_isPlaying) {
+      _audioService.pause();
     } else {
-      // Fall back to audioplayers
-      _audioPlayer.seek(_currentPosition);
-      _audioPlayer.resume();
-      print("Resuming with audioplayers from position: $_currentPosition");
+      _audioService.play();
     }
     
-    _startListeningTimer();
-    
     setState(() {
-      _isPlaying = true;
+      _isPlaying = !_isPlaying;
     });
+    
+    if (_isPlaying) {
+      _startListeningTimer();
+    } else {
+      _stopListeningTimer();
+    }
   }
-}
+
+  void _playNextSong() {
+    if (_currentQueue.isEmpty || _currentIndex >= _currentQueue.length - 1) {
+      print("No next song in queue");
+      return;
+    }
+    
+    _currentIndex++;
+    _playSong(_currentQueue[_currentIndex]);
+  }
+
+  void _playPreviousSong() {
+    if (_currentQueue.isEmpty || _currentIndex <= 0) {
+      print("No previous song in queue");
+      return;
+    }
+    
+    _currentIndex--;
+    _playSong(_currentQueue[_currentIndex]);
+  }
 
   void _cancelPlayback() {
-    _audioPlayer.stop();
-    _justAudioPlayer.stop();
-    _stopListeningTimer();
+    _audioService.stop();
     setState(() {
       _currentlyPlaying = null;
       _isPlaying = false;
-      _currentPosition = Duration.zero;
-      _songDuration = Duration.zero;
     });
+    _stopListeningTimer();
+  }
+
+  void _openExpandedPlayer() {
+    if (_currentlyPlaying != null) {
+      Navigator.push(
+        context,
+        PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) => ExpandedMusicPlayer(
+            album: _currentlyPlaying!,
+            audioService: _audioService, // Pass the existing AudioPlayerService instance
+            onNextSong: _playNextSong,
+            onPreviousSong: _playPreviousSong,
+            onTogglePlayPause: _togglePlayPause,
+            isPlaying: _isPlaying,
+          ),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return FadeTransition(
+              opacity: animation,
+              child: child,
+            );
+          },
+        ),
+      );
+    }
   }
 }
 

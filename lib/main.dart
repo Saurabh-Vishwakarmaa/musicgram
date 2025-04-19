@@ -1,12 +1,17 @@
+import 'dart:io';
+
 import 'package:appwrite/appwrite.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:musicgram4/authpages/loginpage.dart';
 import 'package:musicgram4/authpages/registerpage.dart';
 
 import 'package:musicgram4/configs/appwritecongif.dart';
+import 'package:musicgram4/notifications/media_notifications.dart';
 import 'package:musicgram4/pageesviews.dart';
 import 'package:musicgram4/practice/youtubeapi.dart';
 import 'package:musicgram4/screens/homepage.dart';
+import 'package:musicgram4/services/audio_player_service.dart';
 import 'package:musicgram4/settingspage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -19,6 +24,12 @@ late Storage storage;
 Future<void> main() async {
   try {
     WidgetsFlutterBinding.ensureInitialized();
+
+   
+
+     // Initialize the media notification service
+  await MediaNotificationService().init();
+    final audioService = AudioPlayerService();
     
     // Initialize Appwrite
     client = Client()
@@ -38,6 +49,9 @@ Future<void> main() async {
   
   runApp(const MyApp());
 }
+
+
+
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
