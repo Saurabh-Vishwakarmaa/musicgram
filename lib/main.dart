@@ -11,6 +11,7 @@ import 'package:musicgram4/notifications/media_notifications.dart';
 import 'package:musicgram4/pageesviews.dart';
 import 'package:musicgram4/practice/youtubeapi.dart';
 import 'package:musicgram4/screens/homepage.dart';
+import 'package:musicgram4/services/appwrite_service.dart';
 import 'package:musicgram4/services/audio_player_service.dart';
 import 'package:musicgram4/settingspage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,13 +30,17 @@ Future<void> main() async {
 
      // Initialize the media notification service
   await MediaNotificationService().init();
+  await AppwriteService.initialize();
+
     final audioService = AudioPlayerService();
     
     // Initialize Appwrite
-    client = Client()
-      .setEndpoint(AppConfig.endpoint)
-      .setProject(AppConfig.projectId)
-      .setSelfSigned(status: true); // Remove in production
+   
+    // Initialize Appwrite with hardcoded values
+client = Client()
+  .setEndpoint('https://cloud.appwrite.io/v1')  // Hardcoded endpoint
+  .setProject('67ebee1b003c16ce8f88')          // Hardcoded project ID
+  .setSelfSigned(status: true);                // Remove in production
     
     // Initialize Appwrite services
     account = Account(client);
@@ -131,7 +136,7 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Image.asset('assets/logo.png', height: 150),
+            Image.asset('assets/logo.png', height: 350),
             SizedBox(height: 20),
             CircularProgressIndicator(),
           ],

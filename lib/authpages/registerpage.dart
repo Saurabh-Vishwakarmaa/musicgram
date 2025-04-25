@@ -258,15 +258,20 @@ class _SignupPageState extends State<SignupPage> {
       // Create user preferences in the database (optional)
       try {
         await databases.createDocument(
-          databaseId: 'your-database-id', // Replace with your actual database ID
-          collectionId: 'users', // Replace with your collection ID
+          databaseId: '68065f990028fd7ab9f6', // ✅ Use your actual database ID
+          collectionId: '68065fc1000215395c66', // ✅ Use your user_profiles collection ID
           documentId: ID.unique(),
           data: {
             'user_id': user.$id,
-            'name': name,
+            'username': name.toLowerCase().replaceAll(' ', '_'), // Generate a username
+            'display_name': name,
             'email': email,
-            'phone': phone,
+            'bio': '',
+            'avatar_file_id': null,
             'created_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+            'followers_count': 0,
+            'following_count': 0,
           },
         );
       } catch (e) {

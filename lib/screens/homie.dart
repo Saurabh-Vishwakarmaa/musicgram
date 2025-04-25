@@ -1500,35 +1500,101 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildGreetingBanner(),
+            // Greeting banner - made flexible with constraints
+            if (_greetingVisible)
+              FadeTransition(
+                opacity: _fadeAnimation,
+                child: Container(
+                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  color: Colors.black87,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${_getGreeting()}$userName',
+                              style: GoogleFonts.poppins(
+                                fontWeight: FontWeight.bold,
+                                fontSize: screenSize.width < 360 ? 20 : 24,
+                                color: Colors.white,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(
+                              "Let's explore some music!",
+                              style: GoogleFonts.poppins(
+                                fontSize: screenSize.width < 360 ? 14 : 16,
+                                color: Colors.white70,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.close, color: Colors.white),
+                        onPressed: () {
+                          setState(() {
+                            _greetingVisible = false;
+                          });
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              
+            // Page heading
             Padding(
-              padding: const EdgeInsets.all(16.0),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
               child: Text(
                 "Home",
                 style: GoogleFonts.poppins(
                   fontWeight: FontWeight.bold,
-                  fontSize: 32,
+                  fontSize: screenSize.width < 360 ? 28 : 32,
                   color: Colors.white,
                 ),
               ),
             ),
+            
+            // Main scrollable content
             Expanded(
               child: ListView(
                 controller: _scrollController,
+                physics: BouncingScrollPhysics(),
                 children: [
                   _buildFunctionTiles(),
-                  SizedBox(height: 16),
+                  
+                  // Recommended albums section
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                    child: Text(
+                      "Recommended Albums",
+                      style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 22,
+                        color: Colors.white,
+                      ),
+                    ),
                   ),
-                  SizedBox(height: 16),
-                  _buildRecommendedAlbums(),
+                  
+                  // Albums grid with responsive sizing
+                  _buildResponsiveAlbumGrid(screenSize),
                 ],
               ),
             ),
@@ -1537,24 +1603,144 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       ),
     );
   }
+
+  // New method for responsive album grid
+  Widget _buildResponsiveAlbumGrid(Size screenSize) {
+    // Calculate ideal item width based on screen size
+    final crossAxisCount = screenSize.width < 600 ? 2 : 3;
+    
+    return Padding(
+      padding: const EdgeInsets.all(12.0),
+      child: GridView.builder(
+        physics: NeverScrollableScrollPhysics(),
+        shrinkWrap: true,
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: crossAxisCount,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          childAspectRatio: 0.8, // Slightly taller than wide for better text display
+        ),
+        itemCount: albums.length,
+        itemBuilder: (context, index) {
+          final album = albums[index];
+          return _buildAlbumCard(album);
+        },
+      ),
+    );
+  }
+
+  // Album card with error handling for images
+  Widget _buildAlbumCard(Album album) {
+    return GestureDetector(
+      onTap: () {
+        widget.onPlaySong(album);
+        addToRecentlyPlayed(album);
+      },
+      child: Card(
+        elevation: 4,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        color: Colors.grey[900],
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Album image with error handling
+              Expanded(
+                flex: 3,
+                child: album.imageUrl != null
+                    ? Image.network(
+                        album.imageUrl!,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) {
+                          return Container(
+                            color: Colors.grey[800],
+                            child: Center(
+                              child: Icon(Icons.music_note, size: 40, color: Colors.white70),
+                            ),
+                          );
+                        },
+                      )
+                    : Container(
+                        color: Colors.grey[800],
+                        child: Center(
+                          child: Icon(Icons.music_note, size: 40, color: Colors.white70),
+                        ),
+                      ),
+              ),
+              
+              // Album info
+              Expanded(
+                flex: 1,
+                child: Container(
+                  padding: EdgeInsets.all(8),
+                  color: Colors.black45,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        album.name,
+                        style: GoogleFonts.poppins(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          color: Colors.white,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (album.artist != null && album.artist!.isNotEmpty)
+                        Text(
+                          album.artist!,
+                          style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            color: Colors.white70,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
+// Update the Album class to include ID and artist name
+
 class Album {
+  final String id;  // Add ID field
   final String name;
   final String downloadUrl;
   final String? imageUrl;
-
-  Album(this.name, this.downloadUrl, this.imageUrl);
+  final String? artist;  // Add artist field
+  
+  Album(
+    this.name,
+    this.downloadUrl,
+    this.imageUrl, {
+    this.id = 'default_song',  // Default value
+    this.artist,
+  });
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'name': name,
         'downloadUrl': downloadUrl,
         'imageUrl': imageUrl,
+        'artist': artist,
       };
 
   static Album fromJson(Map<String, dynamic> json) => Album(
         json['name'],
         json['downloadUrl'],
         json['imageUrl'],
+        id: json['id'],
+        artist: json['artist'],
       );
 }
