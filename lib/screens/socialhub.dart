@@ -202,14 +202,14 @@ class _SocialHubState extends State<SocialHub> with SingleTickerProviderStateMix
                 _buildMessagesTab(),
               ],
             ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          // Add new post/share music
-          _showShareMusicSheet();
-        },
-        backgroundColor: Colors.purple,
-        child: Icon(Icons.music_note),
-      ),
+      // floatingActionButton: FloatingActionButton(
+      //   onPressed: () {
+      //     // Add new post/share music
+      //     _showShareMusicSheet();
+      //   },
+      //   backgroundColor: Colors.purple,
+      //   child: Icon(Icons.music_note),
+      // ),
     );
   }
   

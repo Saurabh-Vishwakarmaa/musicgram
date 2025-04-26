@@ -109,21 +109,47 @@ class ChatService {
       return [];
     }
   }
+
+  // Add this method to your ChatService class
+  Future<void> updateTypingStatus(String conversationId, String userId, bool isTyping) async {
+    try {
+      // Update the typing status in the conversation document
+      // You might need to adjust this based on your database schema
+      await databases.updateDocument(
+        databaseId: apt.AppConfig.databaseId,
+        collectionId: apt.AppConfig.chatchat_conversations,
+        documentId: conversationId,
+        data: {
+          isTyping ? 'typing_user_id' : 'typing_user_id': isTyping ? userId : null,
+        },
+      );
+    } catch (e) {
+      print('Error updating typing status: $e');
+    }
+  }
   
   // Get messages for a conversation
   Future<List<Document>> getConversationMessages(
     String conversationId, {
     int limit = 30,
+    String? lastId, // For pagination
   }) async {
     try {
+      List<String> queries = [
+        Query.equal('conversation_id', conversationId),
+        Query.orderAsc('timestamp'), // Use ascending order for chronological display
+        Query.limit(limit),
+      ];
+      
+      // Add cursor pagination if lastId is provided
+      if (lastId != null) {
+        queries.add(Query.cursorAfter(lastId));
+      }
+      
       final result = await databases.listDocuments(
-        databaseId: AppConfig.databaseId,
-        collectionId: _messagesCollection,
-        queries: [
-          Query.equal('conversation_id', conversationId),
-          Query.orderDesc('created_at'),
-          Query.limit(limit),
-        ],
+        databaseId: apt.AppConfig.databaseId,
+        collectionId: apt.AppConfig.chatMessagesCollection,
+        queries: queries,
       );
       
       return result.documents;
@@ -141,39 +167,61 @@ class ChatService {
     required String text,
   }) async {
     try {
-      // Create message in chat_messages collection with all required fields
+      print('ChatService: Sending message to conversation $conversationId: $text');
+      
+      // Create message in chat_messages collection
       final result = await databases.createDocument(
         databaseId: apt.AppConfig.databaseId,
-        collectionId: _messagesCollection, // Use the class constant
+        collectionId: apt.AppConfig.chatMessagesCollection,
         documentId: ID.unique(),
         data: {
           'conversation_id': conversationId,
           'sender_id': senderId,
-          'message': text, // Required field
-          'timestamp': DateTime.now().toIso8601String(), // Required field
+          'message': text,
+          'timestamp': DateTime.now().toIso8601String(),
           'is_read': false,
-          'type': 'text', // Required field - assuming 'text' as default type
-          'media_id': null, // Optional
-          'song_id': null, // Optional
+          'type': 'text',
+          'media_id': null,
+          'song_id': null,
         },
       );
       
-      // Update the conversation with last message info in chat_conversations collection
-      await databases.updateDocument(
-        databaseId: apt.AppConfig.databaseId,
-        collectionId: _chat_conversations, // Use the class constant
-        documentId: conversationId,
-        data: {
-          'last_message': text,
-          'last_message_time': DateTime.now().toIso8601String(),
-          // Update the sender of the last message if needed
-          // 'last_message_sender_id': senderId,
-        },
-      );
+      print('ChatService: Message created with ID: ${result.$id}');
+      
+      // IMPORTANT: Also update the conversation's last message info
+      // This helps with displaying conversation previews
+      try {
+        final conversation = await databases.getDocument(
+          databaseId: apt.AppConfig.databaseId,
+          collectionId: apt.AppConfig.chatchat_conversations,
+          documentId: conversationId,
+        );
+        
+        // Find out if sender is participant1 or participant2
+        final String senderId1 = conversation.data['participant1_id'];
+        final String senderId2 = conversation.data['participant2_id'];
+        final String recipientUnreadField = senderId == senderId1 ? 'unread_count_p2' : 'unread_count_p1';
+        final int currentUnread = conversation.data[recipientUnreadField] ?? 0;
+        
+        // Update conversation with last message details and increment unread count
+        await databases.updateDocument(
+          databaseId: apt.AppConfig.databaseId,
+          collectionId: apt.AppConfig.chatchat_conversations,
+          documentId: conversationId,
+          data: {
+            'last_message': text,
+            'last_message_time': DateTime.now().toIso8601String(),
+            recipientUnreadField: currentUnread + 1,
+          },
+        );
+      } catch (e) {
+        print('Error updating conversation last message: $e');
+        // Continue even if this fails - the message was still sent
+      }
       
       return result;
     } catch (e) {
-      print('Error sending message: $e');
+      print('ChatService: Error sending message: $e');
       throw e;
     }
   }
@@ -182,29 +230,40 @@ class ChatService {
   Future<void> markConversationAsRead(String conversationId, String userId) async {
     try {
       final conversation = await databases.getDocument(
-        databaseId: AppConfig.databaseId,
-        collectionId: _chat_conversations,
+        databaseId: apt.AppConfig.databaseId,
+        collectionId: apt.AppConfig.chatchat_conversations,
         documentId: conversationId,
       );
       
-      final String user1Id = conversation.data['user1_id'];
+      // Check if the conversation uses participant1_id/participant2_id or user1_id/user2_id
+      final bool hasParticipant1Field = conversation.data.containsKey('participant1_id');
       
-      // Determine which unread field to update
-      final String unreadCountField = userId == user1Id ? 'unread_count_1' : 'unread_count_2';
+      // Determine which fields to use based on schema
+      final String user1IdField = hasParticipant1Field ? 'participant1_id' : 'user1_id';
+      final String user2IdField = hasParticipant1Field ? 'participant2_id' : 'user2_id';
+      final String unreadCount1Field = hasParticipant1Field ? 'unread_count_p1' : 'unread_count_1';
+      final String unreadCount2Field = hasParticipant1Field ? 'unread_count_p2' : 'unread_count_2';
       
+      // Check which participant this user is
+      final bool isFirstUser = conversation.data[user1IdField] == userId;
+      final String unreadCountField = isFirstUser ? unreadCount1Field : unreadCount2Field;
+      
+      print('Marking conversation $conversationId as read for user $userId (field: $unreadCountField)');
+      
+      // Update the unread counter
       await databases.updateDocument(
-        databaseId: AppConfig.databaseId,
-        collectionId: _chat_conversations,
+        databaseId: apt.AppConfig.databaseId,
+        collectionId: apt.AppConfig.chatchat_conversations,
         documentId: conversationId,
         data: {
           unreadCountField: 0,
         },
       );
       
-      // Also mark all messages as read
+      // Mark all messages from the other user as read
       final batch = await databases.listDocuments(
-        databaseId: AppConfig.databaseId,
-        collectionId: _messagesCollection,
+        databaseId: apt.AppConfig.databaseId,
+        collectionId: apt.AppConfig.chatMessagesCollection,
         queries: [
           Query.equal('conversation_id', conversationId),
           Query.notEqual('sender_id', userId),
@@ -213,11 +272,13 @@ class ChatService {
         ],
       );
       
+      print('Marking ${batch.documents.length} messages as read');
+      
       // Update each message's read status
       for (var message in batch.documents) {
         await databases.updateDocument(
-          databaseId: AppConfig.databaseId,
-          collectionId: _messagesCollection,
+          databaseId: apt.AppConfig.databaseId,
+          collectionId: apt.AppConfig.chatMessagesCollection,
           documentId: message.$id,
           data: {
             'is_read': true,
@@ -248,20 +309,28 @@ class ChatService {
     }
   }
   
-  // Subscribe to new messages in a conversation
+   // Replace your current subscribeToMessages method with this improved version
   RealtimeSubscription subscribeToMessages(
     String conversationId,
     Function(Document) onNewMessage,
   ) {
     final subscription = realtime.subscribe([
-      'databases.${AppConfig.databaseId}.collections.${_messagesCollection}.documents'
+      'databases.${apt.AppConfig.databaseId}.collections.${apt.AppConfig.chatMessagesCollection}.documents'
     ]);
     
     subscription.stream.listen((response) {
       if (response.events.contains('databases.*.collections.*.documents.*.create')) {
-        final document = Document.fromMap(response.payload);
-        if (document.data['conversation_id'] == conversationId) {
-          onNewMessage(document);
+        // This is the key fix: Use Document.fromMap instead of creating document manually
+        try {
+          final document = Document.fromMap(response.payload);
+          
+          // Check if this message belongs to our conversation
+          if (document.data['conversation_id'] == conversationId) {
+            // Call the callback with the new document
+            onNewMessage(document);
+          }
+        } catch (e) {
+          print('Error parsing real-time document: $e');
         }
       }
     });
