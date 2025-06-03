@@ -10,6 +10,7 @@ import 'package:musicgram4/social/models/user_profile.dart';
 import 'package:musicgram4/social/screens/conversations_list.dart';
 import 'package:musicgram4/social/screens/friend_finder.dart';
 import 'package:musicgram4/social/screens/paired_listening.dart';
+import 'package:musicgram4/social/screens/paired_listening_entry.dart';
 import 'package:musicgram4/social/widgets/activity_item.dart';
 import 'package:appwrite/appwrite.dart';
 import 'package:appwrite/models.dart';
@@ -1265,7 +1266,7 @@ Widget _buildMessagesTab() {
                   Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (context) => PairedListeningScreen(
+                      builder: (context) => PairedListeningEntryScreen(
                         // Pass no parameters to create an open session
                       ),
                     ),

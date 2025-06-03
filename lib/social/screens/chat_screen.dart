@@ -7,6 +7,7 @@ import 'package:musicgram4/social/widgets/chatbubble.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import 'package:musicgram4/services/appwrite_service.dart' as apt;
 import 'package:musicgram4/services/chat_service.dart';
+import 'package:intl/intl.dart';
 
 import 'package:flutter/services.dart';
 
@@ -147,12 +148,23 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isTyping = false;
   bool _isOtherUserTyping = false;
   bool _isRealtimeConnected = false;
+  DateTime? _otherUserLastSeen;
   
   RealtimeSubscription? _subscription;
   Timer? _typingTimer;
   Timer? _markAsReadTimer;
 
   Document? _replyingTo;
+
+  // Add these variables to _ChatScreenState
+  bool _isLoadingMore = false;
+  String? _lastMessageId;
+  bool _hasMoreMessages = true;
+  
+  get _startVoiceRecording => null;
+
+  // Add this variable to store the typing subscription
+  RealtimeSubscription? _typingSubscription;
 
   @override
   void initState() {
@@ -163,6 +175,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _subscription?.close();
+    _typingSubscription?.close(); // Added this line
     _markAsReadTimer?.cancel();
     _typingTimer?.cancel();
     _scrollController.dispose();
@@ -194,44 +207,70 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _loadMessages() async {
-    if (_currentUserId == null) return;
-    
+  // Update _loadMessages to support pagination
+  Future<void> _loadMessages({bool initial = true}) async {
+  if (_currentUserId == null) return;
+  
+  if (initial) {
     setState(() {
       _isLoading = true;
     });
-    
-    try {
-      // Use the chatService to get messages
-      final messages = await _chatService.getConversationMessages(widget.conversationId);
-      
-      setState(() {
-        // Sort messages by timestamp to ensure correct order
-        _messages = messages..sort((a, b) {
-          final aTime = DateTime.parse(a.data['timestamp']);
-          final bTime = DateTime.parse(b.data['timestamp']);
-          return aTime.compareTo(bTime); // Ascending order - oldest first
-        });
-        _isLoading = false;
-      });
-      
-      // Scroll to bottom
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    } catch (e) {
-      print('Error loading messages: $e');
-      setState(() {
-        _isLoading = false;
-      });
-    }
+  } else {
+    setState(() {
+      _isLoadingMore = true;
+    });
   }
+  
+  try {
+    // Get messages with pagination
+    final messages = await _chatService.getConversationMessages(
+      widget.conversationId,
+
+    );
+    
+    print("Loaded ${messages.length} messages" + (initial ? "" : " (older)"));
+    
+    // Update pagination state
+    _hasMoreMessages = messages.length >= 20;
+    if (messages.isNotEmpty) {
+      _lastMessageId = messages.first.$id;
+    }
+    
+    // IMPORTANT: Track these messages as processed to prevent duplicates
+    for (var message in messages) {
+      _processedMessageIds.add(message.$id);
+    }
+    
+    setState(() {
+      if (initial) {
+        _messages = messages;
+        _isLoading = false;
+      } else {
+        // For pagination, add messages to the beginning
+        _messages.insertAll(0, messages);
+        _isLoadingMore = false;
+      }
+      
+      // Sort messages by timestamp
+      _messages.sort((a, b) {
+        final aTime = DateTime.parse(a.data['timestamp']);
+        final bTime = DateTime.parse(b.data['timestamp']);
+        return aTime.compareTo(bTime);
+      });
+    });
+    
+    // Only scroll to bottom on initial load
+    if (initial) {
+      _scrollToBottom();
+    }
+  } catch (e) {
+    print('Error loading messages: $e');
+    setState(() {
+      _isLoading = false;
+      _isLoadingMore = false;
+    });
+  }
+}
 
   // Add this method to set up the real-time subscription
   void _setupRealTimeListener() {
@@ -246,23 +285,16 @@ class _ChatScreenState extends State<ChatScreen> {
         
         if (!mounted) return;
         
-        // CRITICAL FIX: Don't process messages I've sent myself
-        // Only process messages from the other user
-        if (newMessage.data['sender_id'] == _currentUserId) {
-          print('Ignoring my own message from realtime: ${newMessage.$id}');
-          return;
-        }
-        
-        // Better duplicate check using our tracked IDs
+        // Important: Check if this message is already in our list
         if (_processedMessageIds.contains(newMessage.$id)) {
           print('Skipping duplicate message: ${newMessage.$id}');
           return;
         }
         
-        // Add to processed set
+        // Track the message ID to avoid duplicates
         _processedMessageIds.add(newMessage.$id);
         
-        // Update UI with new message from other user
+        // Update UI with new message
         setState(() {
           _messages.add(newMessage);
           
@@ -274,21 +306,24 @@ class _ChatScreenState extends State<ChatScreen> {
           });
         });
         
-        // Scroll to bottom
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollController.hasClients) {
-            _scrollController.animateTo(
-              _scrollController.position.maxScrollExtent,
-              duration: Duration(milliseconds: 300),
-              curve: Curves.easeOut,
-            );
-          }
-        });
+        // Only auto-scroll if it's from the other user or we're already near bottom
+        bool isFromOtherUser = newMessage.data['sender_id'] != _currentUserId;
+        bool isNearBottom = _scrollController.hasClients && 
+                           _scrollController.position.maxScrollExtent - _scrollController.position.pixels < 200;
         
-        // Mark as read
-        _markConversationAsRead();
+        if (isFromOtherUser || isNearBottom) {
+          _scrollToBottom();
+        }
+        
+        // Mark as read if from other user
+        if (isFromOtherUser) {
+          _markConversationAsRead();
+        }
       },
     );
+    
+    // Also subscribe to typing status updates
+    _setupTypingStatusListener();
   }
 
   void _markConversationAsRead() {
@@ -301,34 +336,41 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendMessage() async {
-    final text = _textController.text.trim();
-    if (text.isEmpty || _isSending) return;
-    
-    _textController.clear();
-    
-    setState(() {
-      _isSending = true;
-    });
-    
-    try {
-      // Stop typing indicator
-      if (_isTyping) {
-        _isTyping = false;
-        _typingTimer?.cancel();
-        // You would implement typing indicator functionality here
-      }
-      
-      // Send the message
-      final newMessage = await _chatService.sendMessage(
+  final text = _textController.text.trim();
+  if (text.isEmpty || _isSending) return;
+  
+  // Clear text field immediately for better UX
+  _textController.clear();
+  
+  setState(() {
+    _isSending = true;
+  });
+  
+  try {
+    // Stop typing indicator
+    if (_isTyping) {
+      _isTyping = false;
+      _typingTimer?.cancel();
+      _chatService.updateTypingStatus(
         conversationId: widget.conversationId,
-        senderId: _currentUserId!,
-        text: text,
+        userId: _currentUserId!,
+        isTyping: false
       );
-      
-      // Track this message ID to prevent duplicates
-      _processedMessageIds.add(newMessage.$id);
-      
-      // Update UI
+    }
+    
+    final newMessage = await _chatService.sendMessage(
+      conversationId: widget.conversationId,
+      senderId: _currentUserId!,
+      text: text,
+    );
+    
+    print("Message sent with ID: ${newMessage.$id}");
+    
+    // IMPORTANT: Track this message ID to prevent duplicates
+    _processedMessageIds.add(newMessage.$id);
+    
+    // IMPORTANT: Update local state immediately
+    if (mounted) {
       setState(() {
         _messages.add(newMessage);
         _isSending = false;
@@ -341,30 +383,25 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       });
       
-      // Scroll to bottom
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    } catch (e) {
-      print('Error sending message: $e');
+      // Always scroll to bottom after sending
+      _scrollToBottom();
+    }
+  } catch (e) {
+    print('Error sending message: $e');
+    if (mounted) {
       setState(() {
         _isSending = false;
       });
       
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Failed to send message. Please try again.'),
+          content: Text('Failed to send message: ${e.toString()}'),
           backgroundColor: Colors.red,
         ),
       );
     }
   }
+}
 
   void _handleTypingIndicator(String text) {
     if (_currentUserId == null) return;
@@ -374,7 +411,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _isTyping = true;
       _chatService.updateTypingStatus(
         conversationId: widget.conversationId, 
-
         userId: _currentUserId!,
 
         isTyping: true
@@ -397,112 +433,273 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessagesList() {
-    if (_isLoading) {
-      return Center(child: CircularProgressIndicator(color: Colors.greenAccent));
-    }
-    
-    if (_messages.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.chat_bubble_outline, size: 48, color: Colors.grey[500]),
-            SizedBox(height: 4),
-            Text(
-              'Start a conversation',
-              style: GoogleFonts.poppins(
-                fontSize: 14,
-                color: Colors.grey[600],
+  if (_isLoading) {
+    return Center(child: CircularProgressIndicator(color: Colors.greenAccent));
+  }
+  
+  if (_messages.isEmpty) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey[400]),
+          SizedBox(height: 16),
+          Text(
+            'No messages yet',
+            style: TextStyle(
+              fontSize: 18,
+              color: Colors.grey[600],
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            'Start the conversation!',
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey[500],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // Sort messages by timestamp - do this ONCE outside of build
+  _messages.sort((a, b) {
+    final aTime = DateTime.parse(a.data['timestamp']);
+    final bTime = DateTime.parse(b.data['timestamp']);
+    return aTime.compareTo(bTime);
+  });
+  
+  return NotificationListener<ScrollNotification>(
+    onNotification: (ScrollNotification scrollInfo) {
+      // Only load more if we're at the top, have more messages, and aren't already loading
+      if (!_isLoadingMore && 
+          _hasMoreMessages && 
+          scrollInfo.metrics.pixels == scrollInfo.metrics.minScrollExtent) {
+        // Use Future.microtask to avoid setState during build
+        Future.microtask(() => _loadMessages(initial: false));
+      }
+      return true;
+    },
+    child: ListView.builder(
+      key: PageStorageKey<String>('chat_messages'),
+      controller: _scrollController,
+      padding: EdgeInsets.only(bottom: 8, top: 8),
+      reverse: false,
+      itemCount: _messages.length + (_isLoadingMore ? 1 : 0),
+      itemBuilder: (context, index) {
+        // Show loading indicator at the top when loading more
+        if (_isLoadingMore && index == 0) {
+          return Container(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: 24, 
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.greenAccent,
               ),
             ),
-          ],
-        ),
-      );
-    }
-    
-    // Use a key to force ListView rebuild when messages change
-    return ListView.builder(
-      key: ValueKey<int>(_messages.length),
-      controller: _scrollController,
-      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-      itemCount: _messages.length,
-      itemBuilder: (context, index) {
-        final message = _messages[index];
-        final bool isMe = message.data['sender_id'] == _currentUserId;
-        final String messageType = message.data['type'] ?? 'text';
+          );
+        }
+        
+        final actualIndex = _isLoadingMore ? index - 1 : index;
+        if (actualIndex < 0 || actualIndex >= _messages.length) {
+          return SizedBox.shrink();
+        }
+        
+        final message = _messages[actualIndex];
         
         // Check if we should show date header
         bool showDateHeader = false;
-        if (index == 0) {
+        if (actualIndex == 0) {
           showDateHeader = true;
         } else {
           final DateTime currentDate = DateTime.parse(message.data['timestamp']);
-          final DateTime prevDate = DateTime.parse(_messages[index - 1].data['timestamp']);
-          
-          if (currentDate.year != prevDate.year || 
-              currentDate.month != prevDate.month || 
-              currentDate.day != prevDate.day) {
+          final DateTime prevDate = DateTime.parse(_messages[actualIndex - 1].data['timestamp']);
+          if (!_isSameDay(currentDate, prevDate)) {
             showDateHeader = true;
           }
         }
         
-        return Column(
-          children: [
-            if (showDateHeader)
-              _buildDateHeader(message),
-            
-            ChatBubble(
-              message: message.data['message'],
-              isMe: isMe,
-              timestamp: DateTime.parse(message.data['timestamp']),
-              isRead: message.data['is_read'] ?? false,
-              messageType: messageType,
-              onLongPress: () {
-                _showMessageOptions(message);
-              },
-            ),
-          ],
+        return GestureDetector(
+          onLongPress: () => _showMessageOptions(message),
+          child: Column(
+            children: [
+              if (showDateHeader)
+                _buildDateDivider(_getMessageDate(message.data['timestamp'])),
+              _buildMessageBubble(message),
+            ],
+          ),
         );
       },
-    );
+    ),
+  );
+}
+
+  bool _isSameDay(DateTime date1, DateTime date2) {
+    return date1.year == date2.year && 
+           date1.month == date2.month && 
+           date1.day == date2.day;
   }
 
-  Widget _buildDateHeader(Document message) {
-    final DateTime date = DateTime.parse(message.data['timestamp']);
-    final DateTime now = DateTime.now();
-    
-    String headerText;
-    if (date.year == now.year && date.month == now.month && date.day == now.day) {
-      headerText = 'Today';
-    } else if (date.year == now.year && date.month == now.month && date.day == now.day - 1) {
-      headerText = 'Yesterday';
-    } else {
-      headerText = '${date.day}/${date.month}/${date.year}';
-    }
-    
-    return Container(
-      margin: EdgeInsets.only(top: 8, bottom: 12),
-      child: Center(
-        child: Container(
-          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.grey[200],
-            borderRadius: BorderRadius.circular(12),
-          ),
+  Widget _buildMessageBubble(Document message) {
+  final bool isMe = message.data['sender_id'] == _currentUserId;
+  final bubbleColor = isMe ? Theme.of(context).primaryColor : Colors.grey[300];
+  final textColor = isMe ? Colors.white : Colors.black87;
+  final alignment = isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+  final borderRadius = isMe 
+    ? BorderRadius.only(
+        topLeft: Radius.circular(12),
+        bottomLeft: Radius.circular(12),
+        bottomRight: Radius.circular(12),
+      )
+    : BorderRadius.only(
+        topRight: Radius.circular(12),
+        bottomLeft: Radius.circular(12),
+        bottomRight: Radius.circular(12),
+      );
+
+  return InkWell(
+    onLongPress: () => _showMessageOptions(message),
+    child: Column(
+      crossAxisAlignment: alignment,
+      children: [
+        Row(
+          mainAxisAlignment: isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            if (!isMe) _buildAvatar(message.data['sender_id']),
+            
+            Flexible(
+              child: Container(
+                margin: EdgeInsets.only(
+                  top: 8.0,
+                  bottom: 8.0,
+                  left: isMe ? 64.0 : 8.0,
+                  right: isMe ? 8.0 : 64.0,
+                ),
+                padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
+                decoration: BoxDecoration(
+                  color: bubbleColor,
+                  borderRadius: borderRadius,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 3,
+                      offset: Offset(0, 1),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      message.data['message'],
+                      style: TextStyle(
+                        color: textColor,
+                        fontSize: 16.0,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Text(
+                          _formatTime(message.data['timestamp']),
+                          style: TextStyle(
+                            color: textColor.withOpacity(0.7),
+                            fontSize: 12.0,
+                          ),
+                        ),
+                        if (isMe) SizedBox(width: 4),
+                        if (isMe) Icon(
+                          message.data['is_read'] ? Icons.done_all : Icons.done,
+                          size: 14,
+                          color: message.data['is_read'] ? Colors.blue : textColor.withOpacity(0.7),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            
+            if (isMe) _buildAvatar(message.data['sender_id']),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+String _formatTime(String timestamp) {
+  final DateTime time = DateTime.parse(timestamp);
+  final DateTime now = DateTime.now();
+  if (now.difference(time).inDays > 0) {
+    return DateFormat('MMM d, h:mm a').format(time);
+  } else {
+    return DateFormat('h:mm a').format(time);
+  }
+}
+
+Widget _buildAvatar(String userId) {
+  // You might want to fetch user details or use a cached image
+  return Container(
+    margin: EdgeInsets.only(bottom: 8),
+    child: CircleAvatar(
+      radius: 16,
+      backgroundColor: Colors.grey[200],
+      child: Text(
+        userId.substring(0, 1).toUpperCase(),
+        style: TextStyle(color: Colors.grey[800]),
+      ),
+    ),
+  );
+}
+
+Widget _buildDateDivider(String date) {
+  return Container(
+    margin: EdgeInsets.symmetric(vertical: 16),
+    child: Row(
+      children: [
+        Expanded(child: Divider(thickness: 1, color: Colors.grey[300])),
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12),
           child: Text(
-            headerText,
-            style: GoogleFonts.poppins(
-              fontSize: 12,
+            date,
+            style: TextStyle(
               color: Colors.grey[600],
+              fontSize: 12,
               fontWeight: FontWeight.w500,
             ),
           ),
         ),
-      ),
-    );
-  }
+        Expanded(child: Divider(thickness: 1, color: Colors.grey[300])),
+      ],
+    ),
+  );
+}
 
-  Widget _buildMessageInput() {
+String _getMessageDate(String timestamp) {
+  final date = DateTime.parse(timestamp);
+  final now = DateTime.now();
+  
+  if (now.difference(date).inDays == 0) {
+    return 'Today';
+  } else if (now.difference(date).inDays == 1) {
+    return 'Yesterday';
+  } else if (now.difference(date).inDays < 7) {
+    return DateFormat('EEEE').format(date); // Day name
+  } else {
+    return DateFormat('MMM d, yyyy').format(date);
+  }
+}
+
+Widget _buildMessageInput() {
     return Container(
       padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
@@ -568,31 +765,163 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showAttachmentOptions() {
- showModalBottomSheet(
+//   Widget _buildInputField() {
+//   return Container(
+//     padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 12.0),
+//     decoration: BoxDecoration(
+//       color: Theme.of(context).cardColor,
+//       boxShadow: [
+//         BoxShadow(
+//           color: Colors.black12,
+//           offset: Offset(0, -1),
+//           blurRadius: 4,
+//         ),
+//       ],
+//     ),
+//     child: Row(
+//       children: [
+//         // Attachment button
+//         IconButton(
+//           icon: Icon(Icons.attach_file, color: Colors.grey[600]),
+//           onPressed: () {
+//             // Show attachment options
+//             _showAttachmentOptions();
+//           },
+//         ),
+        
+//         // Text input field
+//         Expanded(
+//           child: Container(
+//             padding: EdgeInsets.symmetric(horizontal: 16.0),
+//             decoration: BoxDecoration(
+//               color: Colors.grey[200],
+//               borderRadius: BorderRadius.circular(24.0),
+//             ),
+//             child: TextField(
+//               controller: _textController,
+//               focusNode: _focusNode,
+//               decoration: InputDecoration(
+//                 hintText: 'Type a message...',
+//                 border: InputBorder.none,
+//                 contentPadding: EdgeInsets.symmetric(vertical: 12.0),
+//               ),
+//               onChanged: _handleTypingIndicator,
+//               maxLines: 5,
+//               minLines: 1,
+//               textCapitalization: TextCapitalization.sentences,
+//             ),
+//           ),
+//         ),
+        
+//         // Send button
+//         AnimatedContainer(
+//           duration: Duration(milliseconds: 200),
+//           child: IconButton(
+//             icon: Icon(
+//               _textController.text.trim().isEmpty ? Icons.mic : Icons.send,
+//               color: Theme.of(context).primaryColor,
+//             ),
+//             onPressed: _textController.text.trim().isEmpty
+//                 ? _startVoiceRecording  // Implement this for voice messages
+//                 : _sendMessage,
+//           ),
+//         ),
+//       ],
+//     ),
+//   );
+// }
+
+void _showAttachmentOptions() {
+  showModalBottomSheet(
     context: context,
-    builder: (context) => SafeArea(
+    backgroundColor: Colors.transparent,
+    builder: (context) => Container(
+      padding: EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Theme.of(context).cardColor,
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(24),
+          topRight: Radius.circular(24),
+        ),
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ListTile(
-            leading: Icon(Icons.audiotrack, color: Colors.orange),
-            title: Text('Audio', style: GoogleFonts.poppins()),
-            onTap: () {
-              Navigator.pop(context);
-              _pickAudio();
-            },
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _buildAttachmentOption(
+                icon: Icons.photo,
+                color: Colors.purple,
+                label: 'Gallery',
+                onTap: () => {},
+              ),
+              _buildAttachmentOption(
+                icon: Icons.camera_alt,
+                color: Colors.red,
+                label: 'Camera',
+                onTap: () => {},
+              ),
+              _buildAttachmentOption(
+                icon: Icons.music_note,
+                color: Colors.orange,
+                label: 'Music',
+                onTap: () => {},
+              ),
+            ],
           ),
-          ListTile(
-            leading: Icon(Icons.insert_drive_file, color: Colors.green),
-            title: Text('Document', style: GoogleFonts.poppins()),
-            onTap: () {
-              Navigator.pop(context);
-              _pickDocument();
-            },
+          SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _buildAttachmentOption(
+                icon: Icons.location_on,
+                color: Colors.green,
+                label: 'Location',
+                onTap: () => {},
+              ),
+              _buildAttachmentOption(
+                icon: Icons.person,
+                color: Colors.blue,
+                label: 'Contact',
+                onTap: () => {},
+              ),
+              _buildAttachmentOption(
+                icon: Icons.insert_drive_file,
+                color: Colors.cyan,
+                label: 'Document',
+                onTap: () =>{},
+              ),
+            ],
           ),
         ],
       ),
+    ),
+  );
+}
+
+Widget _buildAttachmentOption({
+  required IconData icon,
+  required Color color,
+  required String label,
+  required VoidCallback onTap,
+}) {
+  return GestureDetector(
+    onTap: onTap,
+    child: Column(
+      children: [
+        Container(
+          width: 60,
+          height: 60,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Icon(icon, color: color, size: 30),
+        ),
+        SizedBox(height: 8),
+        Text(label, style: TextStyle(fontSize: 12)),
+      ],
     ),
   );
 }
@@ -765,7 +1094,7 @@ Future<void> _pickDocument() async {
   //     final newMessage = await _chatService.sendMessage(
   //       conversationId: widget.conversationId,
   //       senderId: _currentUserId!,
-  //       text: '📄 Document: ${result.files.single.name}',
+  //       text: '📎 Document',
   //       type: 'document',
   //       fileUrl: fileUrl,
   //     );
@@ -776,6 +1105,8 @@ Future<void> _pickDocument() async {
   //       _messages.add(newMessage);
   //       _isSending = false;
   //     });
+  //
+  //     _scrollToBottom();
   //   }
   // } catch (e) {
   //   print('Error picking document: $e');
@@ -784,11 +1115,6 @@ Future<void> _pickDocument() async {
   //   });
   //   _showErrorSnackbar('Failed to send document. Please try again.');
   // }
-  
-  // For now, show a placeholder message
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text('Document picker not implemented yet')),
-  );
 }
 
 void _showSearchView() {
@@ -814,46 +1140,7 @@ void _showSearchView() {
 @override
 Widget build(BuildContext context) {
   return Scaffold(
-    appBar: AppBar(
-      title: Row(
-        children: [
-          if (widget.otherUserAvatar != null)
-            CircleAvatar(
-              backgroundImage: NetworkImage(widget.otherUserAvatar!),
-              radius: 16,
-            ),
-          SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  widget.otherUserName,
-                  style: GoogleFonts.poppins(fontSize: 16),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (_isOtherUserTyping)
-                  Text(
-                    'typing...',
-                    style: GoogleFonts.poppins(fontSize: 12, color: Colors.white70),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        IconButton(
-          icon: Icon(Icons.search),
-          onPressed: _showSearchView,
-        ),
-        IconButton(
-          icon: Icon(Icons.more_vert),
-          onPressed: _showChatOptions,
-        ),
-      ],
-    ),
+    appBar: _buildAppBar(),
     body: Column(
       children: [
         // Show connection status indicator
@@ -882,10 +1169,98 @@ Widget build(BuildContext context) {
         Expanded(child: _buildMessagesList()),
         
         // Message input with reply preview
-        _buildMessageInput(),
+        _buildMessageInput(),  // Use this method, not _buildInputField
       ],
     ),
   );
+}
+
+AppBar _buildAppBar() {
+  return AppBar(
+    elevation: 0,
+    backgroundColor: Theme.of(context).primaryColor,
+    leadingWidth: 40,
+    title: Row(
+      children: [
+        CircleAvatar(
+          radius: 18,
+          backgroundColor: Colors.grey[200],
+          backgroundImage: widget.otherUserAvatar != null
+            ? NetworkImage(widget.otherUserAvatar!)
+            : null,
+          child: widget.otherUserAvatar == null
+              ? Text(
+                  widget.otherUserName.substring(0, 1).toUpperCase(),
+                  style: TextStyle(color: Colors.grey[800]),
+                )
+              : null,
+        ),
+        SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.otherUserName,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (_isOtherUserTyping)
+                Text(
+                  'typing...',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.normal,
+                  ),
+                )
+              else if (_otherUserLastSeen != null)
+                Text(
+                  _formatLastSeen(_otherUserLastSeen!),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.normal,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ),
+    actions: [
+      IconButton(
+        icon: Icon(Icons.call),
+        onPressed: () {
+          // Implement call functionality
+        },
+      ),
+      IconButton(
+        icon: Icon(Icons.more_vert),
+        onPressed: () {
+          // Show more options
+          _showChatOptions();
+        },
+      ),
+    ],
+  );
+}
+String _formatLastSeen(DateTime lastSeen) {
+  final now = DateTime.now();
+  final difference = now.difference(lastSeen);
+  
+  if (difference.inMinutes < 1) {
+    return 'just now';
+  } else if (difference.inHours < 1) {
+    return '${difference.inMinutes}m ago';
+  } else if (difference.inDays < 1) {
+    return '${difference.inHours}h ago';
+  } else if (difference.inDays < 7) {
+    return '${difference.inDays}d ago';
+  } else {
+    return DateFormat('MMM d').format(lastSeen);
+  }
 }
 
 void _showChatOptions() {
@@ -1123,11 +1498,15 @@ void _showErrorSnackbar(String message) {
 void _scrollToBottom() {
   WidgetsBinding.instance.addPostFrameCallback((_) {
     if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: Duration(milliseconds: 300),
-        curve: Curves.easeOut,
-      );
+      try {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      } catch (e) {
+        print('Error scrolling to bottom: $e');
+      }
     }
   });
 }
@@ -1344,5 +1723,35 @@ void _showMessageOptions(Document message) {
       );
     },
   );
+}
+
+void _setupTypingStatusListener() {
+  _typingSubscription?.close();
+  
+  _typingSubscription = _chatService.realtime.subscribe([
+    'databases.${apt.AppConfig.databaseId}.collections.${apt.AppConfig.chatchat_conversations}.documents.${widget.conversationId}'
+  ]);
+  
+  _typingSubscription!.stream.listen((response) {
+    if (!mounted) return;
+    
+    if (response.events.contains('databases.*.collections.*.documents.*.update')) {
+      try {
+        final conversation = Document.fromMap(response.payload);
+        if (conversation.data['typing_user_id'] != null && 
+            conversation.data['typing_user_id'] != _currentUserId) {
+          setState(() {
+            _isOtherUserTyping = true;
+          });
+        } else {
+          setState(() {
+            _isOtherUserTyping = false;
+          });
+        }
+      } catch (e) {
+        print('Error processing typing update: $e');
+      }
+    }
+  });
 }
 }
