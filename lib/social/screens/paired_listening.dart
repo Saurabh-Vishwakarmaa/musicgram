@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:musicgram4/configs/appwritecongif.dart';
 import 'package:musicgram4/database/social_database_service.dart';
 import 'package:musicgram4/main.dart';
@@ -398,21 +399,33 @@ Future<void> _initSession() async {
         await _fetchSession();
       }
       
-      // Check if session already has a chat
-      final sessionChats = await databases.listDocuments(
-        databaseId: AppConfig.databaseId,
-        collectionId: 'session_chats',
-        queries: [Query.equal('session_id', _sessionId!)],
-      );
-      
-      if (sessionChats.documents.isNotEmpty) {
-        _currentChatId = sessionChats.documents.first.$id;
+      // Try to set up chat, but don't fail if collection doesn't exist
+      try {
+        // Check if session already has a chat
+        final sessionChats = await databases.listDocuments(
+          databaseId: AppConfig.databaseId,
+          collectionId: 'session_chats',
+          queries: [Query.equal('session_id', _sessionId!)],
+        );
         
-        // Load existing messages
-        final messages = sessionChats.documents.first.data['messages'] ?? [];
-        setState(() {
-          _messages = List<Map<String, dynamic>>.from(messages);
-        });
+        if (sessionChats.documents.isNotEmpty) {
+          _currentChatId = sessionChats.documents.first.$id;
+          
+          // Load existing messages
+          final messages = sessionChats.documents.first.data['messages'] ?? [];
+          setState(() {
+            _messages = List<Map<String, dynamic>>.from(messages);
+          });
+          
+          // Set up chat subscription
+          _setupChatSubscription();
+        } else if (_isHost) {
+          // Create a new chat if host
+          await _initializeSessionChat();
+        }
+      } catch (e) {
+        print('Chat functionality unavailable: $e');
+        // Continue without chat functionality
       }
     } else {
       // Creating a new open session
@@ -444,8 +457,13 @@ Future<void> _initSession() async {
         
         _sessionId = session.$id;
         
-        // Initialize session chat
-        await _initializeSessionChat();
+        // Try to initialize chat, but don't fail if it doesn't work
+        try {
+          await _initializeSessionChat();
+        } catch (e) {
+          print('Chat functionality unavailable: $e');
+          // Continue without chat functionality
+        }
         
         // Show the code to the host
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -463,11 +481,6 @@ Future<void> _initSession() async {
     
     // Set up realtime subscription
     _setupRealtimeSubscription();
-    
-    // Set up chat subscription if we have a chat ID
-    if (_currentChatId != null) {
-      _setupChatSubscription();
-    }
     
     // Start periodic updates
     _startPolling();
@@ -557,47 +570,46 @@ Future<void> _initSession() async {
   }
   
   void _startPolling() {
-    // Poll for session updates every 3 seconds (for guest)
-    if (!_isHost) {
-      _pollingTimer = Timer.periodic(Duration(seconds: 3), (timer) async {
-        await _fetchSession();
-        
-        // Sync audio if needed
-        if (_session != null && _session!.currentSongUrl != null) {
-          if (_currentSongUrl != _session!.currentSongUrl) {
-            await _playSong(
-              _session!.currentSongName!,
-              _session!.currentSongUrl!,
-              _session!.imageUrl
-            );
-          }
-          
-          // Sync playback position if it's more than 3 seconds off
-          if (_session!.playbackPosition != null) {
-            final currentPosition = _playbackPosition.toInt();
-            if ((currentPosition - _session!.playbackPosition!).abs() > 3) {
-              await _audioService.seek(Duration(seconds: _session!.playbackPosition!.toInt()));
-            }
-          }
-          
-          // Sync play/pause state
-          if (_isPlaying != _session!.isPlaying) {
-            if (_session!.isPlaying) {
-              _audioService.play();
-            } else {
-              _audioService.pause();
-            }
-            setState(() {
-              _isPlaying = _session!.isPlaying;
-            });
-          }
-        }
-      });
-    } else {
-      // For host, periodically update playback position
+    // For host, periodically update playback position only
+    if (_isHost) {
       _syncTimer = Timer.periodic(Duration(seconds: 5), (timer) {
         if (_isPlaying) {
           _updateSessionPlayback();
+        }
+      });
+    }
+    // For guests, add a fallback polling mechanism that only checks 
+    // if realtime updates aren't working
+    else {
+      _pollingTimer = Timer.periodic(Duration(seconds: 10), (timer) async {
+        print('GUEST POLL: Checking for updates');
+        
+        try {
+          final document = await _socialService.getDocument(
+            collectionId: 'paired_sessions', 
+            documentId: _sessionId!,
+          );
+          
+          // Extract song URL from song_id
+          final songId = document.data['song_id'];
+          final songUrl = (songId != null && songId.toString().startsWith('http')) ? songId : null;
+          
+          // Only take action if we don't have a song URL but the server does
+          if (_currentSongUrl == null && songUrl != null && songUrl != 'default_song') {
+            print('GUEST POLL: Found song URL on server but not locally: $songUrl');
+            
+            final album = homie.Album(
+              document.data['current_song_name'] ?? 'Unknown Song',
+              songUrl,
+              document.data['album_art_url'],
+              artist: document.data['current_artist_name'],
+            );
+            
+            await _forceLoadGuestSong(album, document.data['is_playing'] ?? false, 
+                                document.data['current_position'] ?? 0);
+          }
+        } catch (e) {
+          print('GUEST POLL: Error: $e');
         }
       });
     }
@@ -643,20 +655,21 @@ Future<void> _initSession() async {
     });
     
     if (_isHost && _sessionId != null) {
-      // Update the session with the correct field names
+      // CRITICAL FIX: Store the URL in song_id, not just a reference ID
       await _socialService.updateDocument(
         collectionId: 'paired_sessions',
         documentId: _sessionId!,
         data: {
-          'song_id': album.id ?? 'custom_song',
-          'current_song_name': album.name,
+          'song_id': songUrl,  // Store the full URL here
+          'current_song_name': songName,
           'current_artist_name': album.artist ?? 'Unknown Artist',
-          'album_art_url': album.imageUrl,  // Use this instead of image_url
+          'album_art_url': imageUrl,  // Store the image URL
           'current_position': 0,
           'is_playing': true,
           'last_sync_time': DateTime.now().toIso8601String(),
         },
       );
+      print('Host: Updated session with song URL: $songUrl');
     }
   } catch (e) {
     print('Error playing song: $e');
@@ -802,8 +815,8 @@ Future<void> _initSession() async {
   // Handle playing with Album object
   Future<void> _playSongWithAlbum(homie.Album album) async {
   try {
-    print('DEBUG: Starting to play song: ${album.name}');
-    print('DEBUG: Song URL: ${album.downloadUrl}');
+    print('HOST: Starting to play song: ${album.name}');
+    print('HOST: Song URL: ${album.downloadUrl}');
     
     setState(() {
       _currentSongName = album.name;
@@ -813,28 +826,24 @@ Future<void> _initSession() async {
     });
     
     await _audioService.stop();
-    print('DEBUG: Calling audioService.playSong with album: ${album.name}');
     await _audioService.playSong(album);
-    
-    print('DEBUG: Explicitly calling play() after playSong()');
     await _audioService.play();
     
     setState(() {
       _isPlaying = true;
     });
     
-    // Update using ONLY fields that exist in your schema
+    // CRITICAL: Store URL in song_id field and ensure all metadata is present
     if (_isHost && _sessionId != null) {
+      print('HOST: Updating database with song URL in song_id field');
       await _socialService.updateDocument(
         collectionId: 'paired_sessions',
         documentId: _sessionId!,
         data: {
-          'song_id': album.id ?? 'custom_song',
+          'song_id': album.downloadUrl,  // Store the full URL in song_id
           'current_song_name': album.name,
           'current_artist_name': album.artist ?? 'Unknown Artist',
           'album_art_url': album.imageUrl,
-          // Store the URL in a field that exists in your schema
-          'song_id': album.downloadUrl,  // Repurpose song_id to store the URL
           'current_position': 0,
           'is_playing': true,
           'last_sync_time': DateTime.now().toIso8601String(),
@@ -971,111 +980,104 @@ String _formatTimestamp(String? timestamp) {
   
   // Update the realtime subscription method to handle song changes better
   void _setupRealtimeSubscription() {
-    if (_sessionId == null) return;
+  if (_sessionId == null) return;
+  
+  try {
+    final realtime = Realtime(service.AppwriteService.client);
     
-    try {
-      final realtime = Realtime(service.AppwriteService.client);
-      
-      _sessionSubscription = realtime.subscribe([
-        'databases.${AppConfig.databaseId}.collections.paired_sessions.documents.$_sessionId'
-      ]);
-      
-      _sessionSubscription!.stream.listen(
-        (response) {
-          print('Received session update: ${response.events}');
-          if (response.events.contains('databases.*.collections.*.documents.*.update')) {
-            final updatedDocument = Document.fromMap(response.payload);
-            print('Document updated: ${updatedDocument.data}');
-            
-            if (mounted) {
-              setState(() {
-                _session = PairedSession.fromDocument(updatedDocument);
-              });
+    _sessionSubscription = realtime.subscribe([
+      'databases.${AppConfig.databaseId}.collections.paired_sessions.documents.$_sessionId'
+    ]);
+    
+    _sessionSubscription!.stream.listen(
+      (response) {
+        print('Received session update: ${response.events}');
+        if (response.events.contains('databases.*.collections.*.documents.*.update')) {
+          final updatedDocument = Document.fromMap(response.payload);
+          print('Document updated: ${updatedDocument.data}');
+          
+          if (mounted) {
+            // Guest-specific handling
+            if (!_isHost) {
+              // Extract song URL from song_id - THIS IS CRITICAL
+              final songId = updatedDocument.data['song_id'];
+              final songUrl = (songId != null && songId.toString().startsWith('http')) ? songId : null;
+              final songName = updatedDocument.data['current_song_name'];
+              final artistName = updatedDocument.data['current_artist_name'];
+              final imageUrl = updatedDocument.data['album_art_url'];
+              final isPlaying = updatedDocument.data['is_playing'] ?? false;
+              final position = updatedDocument.data['current_position'] ?? 0;
               
-              // Guest-specific handling
-              if (!_isHost) {
-                // Use song_id as the URL since current_song_url doesn't exist
-                final newSongUrl = updatedDocument.data['song_id'];
-                final newSongName = updatedDocument.data['current_song_name'];
-                final newArtist = updatedDocument.data['current_artist_name'];
-                final newImageUrl = updatedDocument.data['album_art_url'];
-                final isPlaying = updatedDocument.data['is_playing'] ?? false;
-                final position = updatedDocument.data['current_position'] ?? 0;
+              print('GUEST REALTIME: Received update - songId: $songId');
+              print('GUEST REALTIME: songUrl extracted: $songUrl');
+              print('GUEST REALTIME: songName: $songName');
+              print('GUEST REALTIME: isPlaying: $isPlaying');
+              print('GUEST REALTIME: Current local URL: $_currentSongUrl');
+              
+              // Handle song URL if it exists and is not 'default_song'
+              if (songUrl != null && songUrl != 'default_song') {
+                print('GUEST REALTIME: Valid song URL detected');
                 
-                print('GUEST SYNC - Song URL from song_id: $newSongUrl, Current: $_currentSongUrl');
-                
-                // Only process if we have a valid URL in song_id
-                if (newSongUrl != null && newSongUrl.startsWith('http') && newSongUrl != _currentSongUrl) {
-                  print('GUEST: Detected song change to: $newSongName');
+                if (_currentSongUrl != songUrl) {
+                  print('GUEST REALTIME: New song detected, loading: $songName with URL: $songUrl');
                   
+                  // Update state first for UI feedback
                   setState(() {
-                    _currentSongUrl = newSongUrl;
-                    _currentSongName = newSongName;
-                    _currentArtist = newArtist;
-                    _currentImageUrl = newImageUrl;
+                    _currentSongUrl = songUrl;
+                    _currentSongName = songName;
+                    _currentArtist = artistName;
+                    _currentImageUrl = imageUrl;
                   });
                   
                   // Create album and play it
                   final album = homie.Album(
-                    newSongName ?? 'Unknown Song',
-                    newSongUrl,
-                    newImageUrl,
-                    artist: newArtist,
+                    songName ?? 'Unknown Song',
+                    songUrl,
+                    imageUrl,
+                    artist: artistName,
                   );
                   
-                  print('GUEST: Playing new song: ${album.name}, URL: ${album.downloadUrl}');
-                  
-                  _loadGuestSong(album, isPlaying, position);
+                  _forceLoadGuestSong(album, isPlaying, position);
                 } 
-                // Handle play/pause state change
-                else if (_isPlaying != isPlaying && _currentSongUrl != null) {
-                  print('GUEST: Play state changed to: $isPlaying');
+                // If URL is the same but play state changed
+                else if (_isPlaying != isPlaying) {
+                  print('GUEST REALTIME: Play state changed to: $isPlaying');
                   
                   if (isPlaying) {
-                    _audioService.play().then((_) {
-                      setState(() {
-                        _isPlaying = true;
-                      });
-                    });
+                    _audioService.play();
                   } else {
-                    _audioService.pause().then((_) {
-                      setState(() {
-                        _isPlaying = false;
-                      });
-                    });
+                    _audioService.pause();
                   }
+                  setState(() {
+                    _isPlaying = isPlaying;
+                  });
                 }
                 
-                // Handle position change if needed
-                if (_currentSongUrl != null && position > 0) {
-                  final currentPos = _playbackPosition.toInt();
-                  if ((position - currentPos).abs() > 5) {
-                    print('GUEST: Seeking to position: $position');
-                    _audioService.seek(Duration(seconds: position));
-                  }
+                // Update position if needed
+                if (_playbackPosition.toInt() != position && position > 0) {
+                  _audioService.seek(Duration(seconds: position));
+                  setState(() {
+                    _playbackPosition = position.toDouble();
+                  });
                 }
-              }
-              
-              // For all users - check session status
-              if (_session?.status == SessionStatus.ended) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Session ended'))
-                );
-                
-                _audioService.stop();
-                Navigator.of(context).pop();
               }
             }
+            
+            // Update the session for both host and guest
+            setState(() {
+              _session = PairedSession.fromDocument(updatedDocument);
+            });
           }
-        },
-        onError: (error) {
-          print('Realtime subscription error: $error');
-        },
-      );
-    } catch (e) {
-      print('Error setting up realtime subscription: $e');
-    }
+        }
+      },
+      onError: (error) {
+        print('Realtime subscription error: $error');
+      },
+    );
+  } catch (e) {
+    print('Error setting up realtime subscription: $e');
   }
+}
   
   Widget _buildStatusCard() {
   final otherUser = _isHost
@@ -1478,6 +1480,53 @@ Widget _buildNowPlayingSection() {
             ],
           ),
         ),
+        
+        // Troubleshooting section - only visible to guests
+        if (_currentSongUrl != null)
+          Container(
+            margin: EdgeInsets.only(top: 20),
+            child: Column(
+              children: [
+                Text(
+                  'Troubleshooting',
+                  style: GoogleFonts.poppins(
+                    color: Colors.amber,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Song URL: ${_currentSongUrl!.substring(0, min(30, _currentSongUrl!.length))}...',
+                  style: TextStyle(color: Colors.grey[600], fontSize: 10),
+                ),
+                SizedBox(height: 8),
+                ElevatedButton.icon(
+                  icon: Icon(Icons.play_circle),
+                  label: Text('Force Direct Play'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: Colors.black,
+                  ),
+                  onPressed: () async {
+                    try {
+                      // Create a completely new player instance for testing
+                      final testPlayer = AudioPlayer();
+                      await testPlayer.setUrl(_currentSongUrl!);
+                      await testPlayer.play();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Testing direct playback...'))
+                      );
+                    } catch (e) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Error: $e'))
+                      );
+                      print('Direct playback failed: $e');
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
       ],
     ),
   );
@@ -1563,6 +1612,53 @@ Widget _buildInfoRow(String label, String value) {
 }
 
 Widget _buildChatSection() {
+  // Check if chat is available
+  final bool isChatAvailable = _currentChatId != null;
+  
+  if (!isChatAvailable) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.chat_bubble,
+            size: 64,
+            color: Colors.grey[700],
+          ),
+          SizedBox(height: 24),
+          Text(
+            'Chat is unavailable',
+            style: GoogleFonts.poppins(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: Colors.white70,
+            ),
+          ),
+          SizedBox(height: 12),
+          Text(
+            'The chat functionality is not available for this session.',
+            style: GoogleFonts.poppins(
+              fontSize: 14,
+              color: Colors.grey[500],
+            ),
+            textAlign: TextAlign.center,
+          ),
+          Padding(
+            padding: EdgeInsets.all(16),
+            child: Text(
+              'Focus on enjoying the music together!',
+              style: GoogleFonts.poppins(
+                fontSize: 14,
+                fontStyle: FontStyle.italic,
+                color: Colors.greenAccent,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
   return Column(
     children: [
       // Messages list
@@ -1765,4 +1861,128 @@ Widget _buildChatSection() {
     print('ERROR loading guest song: $e');
   }
 }
+
+Future<void> _forceLoadGuestSong(homie.Album album, bool play, int position) async {
+  try {
+    print('GUEST: Force loading song ${album.name}');
+    print('GUEST: URL: ${album.downloadUrl}');
+    
+    if (album.downloadUrl == null || album.downloadUrl.isEmpty) {
+      print('GUEST ERROR: Invalid URL provided');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: Invalid song URL'))
+      );
+      return;
+    }
+    
+    // Show loading feedback
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Loading song...'))
+    );
+    
+    // Update UI first for feedback
+    setState(() {
+      _currentSongName = album.name;
+      _currentSongUrl = album.downloadUrl;
+      _currentImageUrl = album.imageUrl;
+      _currentArtist = album.artist;
+    });
+    
+    // CRITICAL FIX: Reset audio player completely
+
+    // Try direct URL method first
+    try {
+      print('GUEST: Trying direct URL playback');
+   
+      print('GUEST: Direct URL method succeeded');
+      
+      setState(() { _isPlaying = true; });
+      
+      // Seek to position if needed
+      if (position > 0) {
+        await _audioService.seek(Duration(seconds: position));
+      }
+      
+      // This approach worked, so return
+      print('GUEST: Song playback setup complete via direct method');
+      return;
+    } catch (e) {
+      print('GUEST ERROR: Direct playback failed: $e');
+    }
+    
+    // If direct method failed, try the standard approach
+    print('GUEST: Falling back to standard playback method');
+    
+    // Load with retry logic
+    bool loaded = false;
+    for (int i = 0; i < 3 && !loaded; i++) {
+      try {
+        await _audioService.playSong(album);
+        loaded = true;
+        print('GUEST: Song loaded successfully on attempt ${i+1}');
+      } catch (e) {
+        print('GUEST ERROR: Loading attempt ${i+1} failed: $e');
+        await Future.delayed(Duration(milliseconds: 800));
+      }
+    }
+    
+    if (!loaded) {
+      print('GUEST ERROR: All loading attempts failed');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load song after multiple attempts'))
+      );
+      return;
+    }
+    
+    // Set playback state
+    if (play) {
+      await _audioService.play();
+      setState(() { _isPlaying = true; });
+    } else {
+      await _audioService.pause();
+      setState(() { _isPlaying = false; });
+    }
+    
+    // Set position
+    if (position > 0) {
+      await _audioService.seek(Duration(seconds: position));
+    }
+    
+    print('GUEST: Song playback setup complete');
+    
+    // Success notification
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Now playing: ${album.name}'))
+    );
+  } catch (e) {
+    print('FATAL ERROR loading guest song: $e');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error playing song: $e'))
+    );
+  }
 }
+
+// Add a helper method to create a reload button for guests
+Widget _buildReloadButton() {
+  if (!_isHost && _currentSongUrl != null) {
+    return ElevatedButton(
+      onPressed: () {
+        final album = homie.Album(
+          _currentSongName ?? 'Unknown Song',
+          _currentSongUrl!,
+          _currentImageUrl,
+          artist: _currentArtist,
+        );
+        _forceLoadGuestSong(album, true, _playbackPosition.toInt());
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Forcing song playback...'))
+        );
+      },
+      child: Text('Reload Song'),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.redAccent,
+      ),
+    );
+  }
+  return SizedBox.shrink(); // Return empty widget if conditions not met
+}}
