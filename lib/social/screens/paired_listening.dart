@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:http/http.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:just_audio/just_audio.dart';
@@ -39,7 +40,7 @@ class PairedListeningScreen extends StatefulWidget {
 class _PairedListeningScreenState extends State<PairedListeningScreen> {
   late SocialDatabaseService _socialService;
   final AudioPlayerService _audioService = AudioPlayerService();
-  
+  bool _songReadyForSync = false;
   String? _currentUserId;
   String? _currentUsername;
   String? _sessionId;
@@ -570,46 +571,19 @@ Future<void> _initSession() async {
   }
   
   void _startPolling() {
-    // For host, periodically update playback position only
+    // For host, periodically update playback position more frequently
     if (_isHost) {
-      _syncTimer = Timer.periodic(Duration(seconds: 5), (timer) {
+      _syncTimer = Timer.periodic(Duration(seconds: 2), (timer) {
         if (_isPlaying) {
           _updateSessionPlayback();
         }
       });
     }
-    // For guests, add a fallback polling mechanism that only checks 
-    // if realtime updates aren't working
+    // For guests, add more frequent polling for better sync
     else {
-      _pollingTimer = Timer.periodic(Duration(seconds: 10), (timer) async {
-        print('GUEST POLL: Checking for updates');
-        
-        try {
-          final document = await _socialService.getDocument(
-            collectionId: 'paired_sessions', 
-            documentId: _sessionId!,
-          );
-          
-          // Extract song URL from song_id
-          final songId = document.data['song_id'];
-          final songUrl = (songId != null && songId.toString().startsWith('http')) ? songId : null;
-          
-          // Only take action if we don't have a song URL but the server does
-          if (_currentSongUrl == null && songUrl != null && songUrl != 'default_song') {
-            print('GUEST POLL: Found song URL on server but not locally: $songUrl');
-            
-            final album = homie.Album(
-              document.data['current_song_name'] ?? 'Unknown Song',
-              songUrl,
-              document.data['album_art_url'],
-              artist: document.data['current_artist_name'],
-            );
-            
-            await _forceLoadGuestSong(album, document.data['is_playing'] ?? false, 
-                                document.data['current_position'] ?? 0);
-          }
-        } catch (e) {
-          print('GUEST POLL: Error: $e');
+      _pollingTimer = Timer.periodic(Duration(seconds: 3), (timer) async {
+        if (_currentSongUrl != null) {
+          _syncPlaybackPosition();
         }
       });
     }
@@ -815,1014 +789,63 @@ Future<void> _initSession() async {
   // Handle playing with Album object
   Future<void> _playSongWithAlbum(homie.Album album) async {
   try {
-    print('HOST: Starting to play song: ${album.name}');
-    print('HOST: Song URL: ${album.downloadUrl}');
+    print('HOST: Preparing song: ${album.name}');
     
+    // Step 1: First just update the UI and load the song WITHOUT playing
     setState(() {
       _currentSongName = album.name;
       _currentSongUrl = album.downloadUrl;
       _currentImageUrl = album.imageUrl;
       _currentArtist = album.artist;
+      _isPlaying = false;  // Important: Don't start playing yet
     });
     
+    // Just load the song without playing
     await _audioService.stop();
     await _audioService.playSong(album);
-    await _audioService.play();
     
-    setState(() {
-      _isPlaying = true;
-    });
-    
-    // CRITICAL: Store URL in song_id field and ensure all metadata is present
+    // Step 2: Update the session with the new song info, but keep isPlaying false
     if (_isHost && _sessionId != null) {
-      print('HOST: Updating database with song URL in song_id field');
+      print('HOST: Sending song information to guest');
       await _socialService.updateDocument(
         collectionId: 'paired_sessions',
         documentId: _sessionId!,
         data: {
-          'song_id': album.downloadUrl,  // Store the full URL in song_id
+          'song_id': album.downloadUrl,
           'current_song_name': album.name,
           'current_artist_name': album.artist ?? 'Unknown Artist',
           'album_art_url': album.imageUrl,
           'current_position': 0,
-          'is_playing': true,
+          'is_playing': false,
+          'song_loaded': false,  // Add a new field to track loading state
           'last_sync_time': DateTime.now().toIso8601String(),
         },
       );
-    }
-  } catch (e) {
-    print('ERROR playing song: $e');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Error playing song: $e')),
-    );
-  }
-}
-  
-  // Add method to add song to queue
-  // Future<void> _addToQueue(homie.Album album) async {
-  //   setState(() {
-  //     _songQueue.add(album);
-  //   });
-    
-  //   // If no song is currently playing, start playing this one
-  //   if (_currentQueueIndex == -1 || _songQueue.length == 1) {
-  //     await _playNextInQueue();
-  //   }
-    
-  //   // Update session with queue data if host
-  //   if (_isHost && _sessionId != null) {
-  //     final queueData = _songQueue.map((album) => {
-  //       'id': album.id,
-  //       'name': album.name,
-  //       'download_url': album.downloadUrl,
-  //       'image_url': album.imageUrl,
-  //       'artist': album.artist,
-  //     }).toList();
       
-  //     await _socialService.updateDocument(
-  //       collectionId: 'paired_sessions',
-  //       documentId: _sessionId!,
-  //       data: {
-  //         'song_queue': queueData,
-  //         'current_queue_index': _currentQueueIndex,
-  //       },
-  //     );
-  //   }
-  // }
-
-  // Add method to play next song in queue
-  // Future<void> _playNextInQueue() async {
-  //   if (_songQueue.isEmpty) return;
-    
-  //   // Move to next song, or loop back to first if at end
-  //   _currentQueueIndex = (_currentQueueIndex + 1) % _songQueue.length;
-    
-  //   // Play the song
-  //   final nextSong = _songQueue[_currentQueueIndex];
-  //   await _playSongWithAlbum(nextSong);
-    
-  //   // Update session with current index
-  //   if (_isHost && _sessionId != null) {
-  //     await _socialService.updateDocument(
-  //       collectionId: 'paired_sessions',
-  //       documentId: _sessionId!,
-  //       data: {
-  //         'current_queue_index': _currentQueueIndex,
-  //       },
-  //     );
-  //   }
-  // }
-  
-  // Add method to play previous song in queue
-  // Future<void> _playPreviousInQueue() async {
-  //   if (_songQueue.isEmpty) return;
-    
-  //   // Move to previous song, or loop to last if at beginning
-  //   _currentQueueIndex = (_currentQueueIndex - 1 + _songQueue.length) % _songQueue.length;
-    
-  //   // Play the song
-  //   final prevSong = _songQueue[_currentQueueIndex];
-  //   await _playSongWithAlbum(prevSong);
-    
-  //   // Update session with current index
-  //   if (_isHost && _sessionId != null) {
-  //     await _socialService.updateDocument(
-  //       collectionId: 'paired_sessions',
-  //       documentId: _sessionId!,
-  //       data: {
-  //         'current_queue_index': _currentQueueIndex,
-  //       },
-  //     );
-  //   }
-  // }
-  
-  void _sendLocalMessage() {
-    if (_messageController.text.isEmpty) return;
-    
-    final message = {
-      'sender': _currentUsername ?? 'You',
-      'text': _messageController.text,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    };
-    
-    setState(() {
-      _messages.add(message);
-      _messageController.clear();
-    });
-    
-    // In a real app, you would save this message to your database
-  }
-  
-  String _formatDuration(double seconds) {
-    final int mins = (seconds / 60).floor();
-    final int secs = (seconds % 60).floor();
-    return '${mins.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
-  }
-  
-  // Helper method to format ISO timestamp to human-readable time
-String _formatTimestamp(String? timestamp) {
-  if (timestamp == null || timestamp.isEmpty) return '';
-  
-  try {
-    final dateTime = DateTime.parse(timestamp);
-    final now = DateTime.now();
-    
-    if (dateTime.day == now.day && dateTime.month == now.month && dateTime.year == now.year) {
-      return '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
-    } else {
-      return '${dateTime.day}/${dateTime.month} ${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}';
-    }
-  } catch (e) {
-    print('Error formatting timestamp: $e');
-    return '';
-  }
-}
-  
-  // Update the realtime subscription method to handle song changes better
-  void _setupRealtimeSubscription() {
-  if (_sessionId == null) return;
-  
-  try {
-    final realtime = Realtime(service.AppwriteService.client);
-    
-    _sessionSubscription = realtime.subscribe([
-      'databases.${AppConfig.databaseId}.collections.paired_sessions.documents.$_sessionId'
-    ]);
-    
-    _sessionSubscription!.stream.listen(
-      (response) {
-        print('Received session update: ${response.events}');
-        if (response.events.contains('databases.*.collections.*.documents.*.update')) {
-          final updatedDocument = Document.fromMap(response.payload);
-          print('Document updated: ${updatedDocument.data}');
-          
-          if (mounted) {
-            // Guest-specific handling
-            if (!_isHost) {
-              // Extract song URL from song_id - THIS IS CRITICAL
-              final songId = updatedDocument.data['song_id'];
-              final songUrl = (songId != null && songId.toString().startsWith('http')) ? songId : null;
-              final songName = updatedDocument.data['current_song_name'];
-              final artistName = updatedDocument.data['current_artist_name'];
-              final imageUrl = updatedDocument.data['album_art_url'];
-              final isPlaying = updatedDocument.data['is_playing'] ?? false;
-              final position = updatedDocument.data['current_position'] ?? 0;
-              
-              print('GUEST REALTIME: Received update - songId: $songId');
-              print('GUEST REALTIME: songUrl extracted: $songUrl');
-              print('GUEST REALTIME: songName: $songName');
-              print('GUEST REALTIME: isPlaying: $isPlaying');
-              print('GUEST REALTIME: Current local URL: $_currentSongUrl');
-              
-              // Handle song URL if it exists and is not 'default_song'
-              if (songUrl != null && songUrl != 'default_song') {
-                print('GUEST REALTIME: Valid song URL detected');
-                
-                if (_currentSongUrl != songUrl) {
-                  print('GUEST REALTIME: New song detected, loading: $songName with URL: $songUrl');
-                  
-                  // Update state first for UI feedback
-                  setState(() {
-                    _currentSongUrl = songUrl;
-                    _currentSongName = songName;
-                    _currentArtist = artistName;
-                    _currentImageUrl = imageUrl;
-                  });
-                  
-                  // Create album and play it
-                  final album = homie.Album(
-                    songName ?? 'Unknown Song',
-                    songUrl,
-                    imageUrl,
-                    artist: artistName,
-                  );
-                  
-                  _forceLoadGuestSong(album, isPlaying, position);
-                } 
-                // If URL is the same but play state changed
-                else if (_isPlaying != isPlaying) {
-                  print('GUEST REALTIME: Play state changed to: $isPlaying');
-                  
-                  if (isPlaying) {
-                    _audioService.play();
-                  } else {
-                    _audioService.pause();
-                  }
-                  setState(() {
-                    _isPlaying = isPlaying;
-                  });
-                }
-                
-                // Update position if needed
-                if (_playbackPosition.toInt() != position && position > 0) {
-                  _audioService.seek(Duration(seconds: position));
-                  setState(() {
-                    _playbackPosition = position.toDouble();
-                  });
-                }
-              }
-            }
-            
-            // Update the session for both host and guest
-            setState(() {
-              _session = PairedSession.fromDocument(updatedDocument);
-            });
-          }
-        }
-      },
-      onError: (error) {
-        print('Realtime subscription error: $error');
-      },
-    );
-  } catch (e) {
-    print('Error setting up realtime subscription: $e');
-  }
-}
-  
-  Widget _buildStatusCard() {
-  final otherUser = _isHost
-      ? _session?.guestUsername ?? 'Waiting for partner...'
-      : _session?.hostUsername ?? 'Unknown host';
-  
-  final sessionStatus = _session?.status ?? SessionStatus.waiting;
-  final isActive = sessionStatus == SessionStatus.active;
-  
-  return Container(
-    margin: EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: Colors.grey[900],
-      borderRadius: BorderRadius.circular(12),
-    ),
-    child: Padding(
-      padding: EdgeInsets.all(16),
-      child: Row(
-        children: [
-          // Session status icon
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: isActive ? Colors.greenAccent.withOpacity(0.2) : Colors.grey[800],
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(
-              isActive ? Icons.people : Icons.hourglass_empty,
-              color: isActive ? Colors.greenAccent : Colors.grey,
-            ),
-          ),
-          
-          SizedBox(width: 16),
-          
-          // Session info
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: isActive ? Colors.greenAccent : Colors.grey,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    SizedBox(width: 6),
-                    Text(
-                      isActive ? 'Active Session' : 'Waiting for partner',
-                      style: GoogleFonts.poppins(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 4),
-                Text(
-                  _isHost 
-                    ? 'You are hosting for: $otherUser'
-                    : 'Connected with: $otherUser',
-                  style: GoogleFonts.poppins(
-                    fontSize: 12,
-                    color: Colors.grey[400],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          
-          // Session code for host
-          if (_isHost && _sessionName != null)
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: Colors.greenAccent, width: 1),
-              ),
-              child: Row(
-                children: [
-                  Text(
-                    _sessionName!,
-                    style: GoogleFonts.robotoMono(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  SizedBox(width: 4),
-                  GestureDetector(
-                    onTap: () {
-                      Clipboard.setData(ClipboardData(text: _sessionName!));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Code copied to clipboard'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    },
-                    child: Icon(
-                      Icons.copy,
-                      size: 16,
-                      color: Colors.greenAccent,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    ),
-  );
-}
-  
-  @override
-  Widget build(BuildContext context) {
-  return Scaffold(
-    backgroundColor: Colors.black,
-    appBar: AppBar(
-      backgroundColor: Colors.black,
-      elevation: 0,
-      title: Text(
-        'Paired Listening',
-        style: GoogleFonts.poppins(
-          fontSize: 20,
-          fontWeight: FontWeight.w600,
-          color: Colors.white,
-        ),
-      ),
-      actions: [
-        IconButton(
-          icon: Icon(Icons.close, color: Colors.white),
-          onPressed: _endSession,
-          tooltip: 'End Session',
-        ),
-      ],
-    ),
-    body: _isLoading
-      ? Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.greenAccent),
-              ),
-              SizedBox(height: 16),
-              Text(
-                'Setting up your session...',
-                style: GoogleFonts.poppins(
-                  color: Colors.white70,
-                  fontSize: 16,
-                ),
-              )
-            ],
-          ),
+      // Step 3: Show a "waiting for guest" message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Waiting for guest to load song...'),
+          duration: Duration(seconds: 5),
         )
-      : Column(
-          children: [
-            // Session status card
-            _buildStatusCard(),
-            
-            // Main content area with music player and chat
-            Expanded(
-              child: DefaultTabController(
-                length: 2,
-                child: Column(
-                  children: [
-                    // Tab bar
-                    Container(
-                      color: Colors.black,
-                      child: TabBar(
-                        indicatorColor: Colors.greenAccent,
-                        indicatorWeight: 3,
-                        labelColor: Colors.white,
-                        unselectedLabelColor: Colors.grey,
-                        labelStyle: GoogleFonts.poppins(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        tabs: [
-                          Tab(text: 'Now Playing'),
-                          Tab(text: 'Chat'),
-                        ],
-                      ),
-                    ),
-                    
-                    // Tab content
-                    Expanded(
-                      child: TabBarView(
-                        children: [
-                          // Now Playing tab
-                          SingleChildScrollView(
-                            child: _buildNowPlayingSection(),
-                          ),
-                          
-                          // Chat tab
-                          _buildChatSection(),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-  );
-}
-
-Widget _buildNowPlayingSection() {
-  return Padding(
-    padding: EdgeInsets.all(24),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        // Album art - clean and simple
-        Container(
-          width: 250,
-          height: 250,
-          decoration: BoxDecoration(
-            color: Colors.grey[900],
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.3),
-                blurRadius: 10,
-                offset: Offset(0, 5),
-              ),
-            ],
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: _currentImageUrl != null
-            ? Image.network(
-                _currentImageUrl!,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) {
-                  return _buildPlaceholderArt();
-                },
-              )
-            : _buildPlaceholderArt(),
-        ),
-        
-        SizedBox(height: 32),
-        
-        // Song info
-        Text(
-          _currentSongName ?? 'No song selected',
-          style: GoogleFonts.poppins(
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-            color: Colors.white,
-          ),
-          textAlign: TextAlign.center,
-        ),
-        
-        SizedBox(height: 6),
-        
-        Text(
-          _currentArtist ?? 'Select a song to start listening',
-          style: GoogleFonts.poppins(
-            fontSize: 16,
-            color: Colors.grey[400],
-          ),
-          textAlign: TextAlign.center,
-        ),
-        
-        SizedBox(height: 32),
-        
-        // Playback controls
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Select song button (for host only)
-            if (_isHost)
-              IconButton(
-                icon: Icon(Icons.playlist_add, color: Colors.white, size: 26),
-                onPressed: _selectSong,
-                tooltip: 'Select Song',
-              ),
-            
-            SizedBox(width: 20),
-            
-            // Play/Pause button
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: _isHost ? Colors.greenAccent : Colors.grey,
-                shape: BoxShape.circle,
-              ),
-              child: IconButton(
-                icon: Icon(
-                  _isPlaying ? Icons.pause : Icons.play_arrow,
-                  color: Colors.black,
-                  size: 32,
-                ),
-                onPressed: _isHost ? _togglePlayPause : null,
-              ),
-            ),
-            
-            SizedBox(width: 20),
-            
-            // Session information icon
-            IconButton(
-              icon: Icon(Icons.info_outline, color: Colors.white, size: 26),
-              onPressed: () {
-                // Show session info dialog
-                _showSessionInfoDialog();
-              },
-              tooltip: 'Session Info',
-            ),
-          ],
-        ),
-        
-        SizedBox(height: 32),
-        
-        // Progress bar
-        Column(
-          children: [
-            SliderTheme(
-              data: SliderThemeData(
-                trackHeight: 4,
-                thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
-                overlayShape: RoundSliderOverlayShape(overlayRadius: 14),
-                activeTrackColor: Colors.greenAccent,
-                inactiveTrackColor: Colors.grey[800],
-                thumbColor: Colors.white,
-              ),
-              child: Slider(
-                value: _playbackPosition.clamp(0, _songDuration > 0 ? _songDuration : 1),
-                min: 0,
-                max: _songDuration > 0 ? _songDuration : 1,
-                onChanged: _isHost ? (value) {
-                  setState(() {
-                    _playbackPosition = value;
-                  });
-                  _audioService.seek(Duration(seconds: value.toInt()));
-                  _updateSessionPlayback();
-                } : null,
-              ),
-            ),
-            
-            // Time indicators
-            Padding(
-              padding: EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    _formatDuration(_playbackPosition),
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      color: Colors.grey[400],
-                    ),
-                  ),
-                  Text(
-                    _formatDuration(_songDuration),
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      color: Colors.grey[400],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        
-        SizedBox(height: 16),
-        
-        // Now playing status
-        Container(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.grey[900],
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                _isPlaying ? Icons.graphic_eq : Icons.music_note,
-                color: _isPlaying ? Colors.greenAccent : Colors.grey,
-                size: 16,
-              ),
-              SizedBox(width: 8),
-              Text(
-                _isPlaying ? 'Now Playing' : 'Paused',
-                style: GoogleFonts.poppins(
-                  fontSize: 14,
-                  color: _isPlaying ? Colors.white : Colors.grey,
-                ),
-              ),
-            ],
-          ),
-        ),
-        
-        // Troubleshooting section - only visible to guests
-        if (_currentSongUrl != null)
-          Container(
-            margin: EdgeInsets.only(top: 20),
-            child: Column(
-              children: [
-                Text(
-                  'Troubleshooting',
-                  style: GoogleFonts.poppins(
-                    color: Colors.amber,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                SizedBox(height: 8),
-                Text(
-                  'Song URL: ${_currentSongUrl!.substring(0, min(30, _currentSongUrl!.length))}...',
-                  style: TextStyle(color: Colors.grey[600], fontSize: 10),
-                ),
-                SizedBox(height: 8),
-                ElevatedButton.icon(
-                  icon: Icon(Icons.play_circle),
-                  label: Text('Force Direct Play'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.amber,
-                    foregroundColor: Colors.black,
-                  ),
-                  onPressed: () async {
-                    try {
-                      // Create a completely new player instance for testing
-                      final testPlayer = AudioPlayer();
-                      await testPlayer.setUrl(_currentSongUrl!);
-                      await testPlayer.play();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Testing direct playback...'))
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Error: $e'))
-                      );
-                      print('Direct playback failed: $e');
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-      ],
-    ),
-  );
-}
-
-Widget _buildPlaceholderArt() {
-  return Container(
-    color: Colors.grey[900],
-    child: Center(
-      child: Icon(
-        Icons.music_note,
-        size: 80,
-        color: Colors.grey[700],
-      ),
-    ),
-  );
-}
-
-void _showSessionInfoDialog() {
-  showDialog(
-    context: context,
-    builder: (context) => AlertDialog(
-      backgroundColor: Colors.grey[900],
-      title: Text(
-        'Session Information',
-        style: GoogleFonts.poppins(
-          color: Colors.white,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildInfoRow('Status', _session?.status == SessionStatus.active ? 'Active' : 'Waiting'),
-          _buildInfoRow('Host', _session?.hostUsername ?? 'Unknown'),
-          _buildInfoRow('Guest', _session?.guestUsername ?? 'Waiting...'),
-          _buildInfoRow('Your Role', _isHost ? 'Host' : 'Guest'),
-          if (_sessionName != null)
-            _buildInfoRow('Session Code', _sessionName!),
-          _buildInfoRow('Created', _formatTimestamp(_session?.createdAt?.toString() ?? '')),
-        ],
-      ),
-      actions: [
-        TextButton(
-          child: Text(
-            'Close',
-            style: GoogleFonts.poppins(color: Colors.greenAccent),
-          ),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ],
-    ),
-  );
-}
-
-Widget _buildInfoRow(String label, String value) {
-  return Padding(
-    padding: EdgeInsets.only(bottom: 12),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          '$label: ',
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w600,
-            color: Colors.grey[400],
-            fontSize: 14,
-          ),
-        ),
-        Expanded(
-          child: Text(
-            value,
-            style: GoogleFonts.poppins(
-              color: Colors.white,
-              fontSize: 14,
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-Widget _buildChatSection() {
-  // Check if chat is available
-  final bool isChatAvailable = _currentChatId != null;
-  
-  if (!isChatAvailable) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            Icons.chat_bubble,
-            size: 64,
-            color: Colors.grey[700],
-          ),
-          SizedBox(height: 24),
-          Text(
-            'Chat is unavailable',
-            style: GoogleFonts.poppins(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-              color: Colors.white70,
-            ),
-          ),
-          SizedBox(height: 12),
-          Text(
-            'The chat functionality is not available for this session.',
-            style: GoogleFonts.poppins(
-              fontSize: 14,
-              color: Colors.grey[500],
-            ),
-            textAlign: TextAlign.center,
-          ),
-          Padding(
-            padding: EdgeInsets.all(16),
-            child: Text(
-              'Focus on enjoying the music together!',
-              style: GoogleFonts.poppins(
-                fontSize: 14,
-                fontStyle: FontStyle.italic,
-                color: Colors.greenAccent,
-              ),
-            ),
-          ),
-        ],
-      ),
+      );
+      
+      // Step 4: Wait a moment for the guest to receive the song
+      await Future.delayed(Duration(seconds: 3));
+      
+      // Step 5: Show the "Play Together" button or use auto-sync
+      setState(() {
+        _songReadyForSync = true;  // Add this state variable to your class
+      });
+    }
+  } catch (e) {
+    print('ERROR preparing song: $e');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error preparing song: $e')),
     );
   }
-  
-  return Column(
-    children: [
-      // Messages list
-      Expanded(
-        child: _messages.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline,
-                    size: 48,
-                    color: Colors.grey[700],
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'No messages yet',
-                    style: GoogleFonts.poppins(
-                      fontSize: 16,
-                      color: Colors.grey[500],
-                    ),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Share your thoughts about the music!',
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      color: Colors.grey[600],
-                    ),
-                  ),
-                ],
-              ),
-            )
-          : ListView.builder(
-              padding: EdgeInsets.all(16),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                final isMe = message['sender_id'] == _currentUserId;
-                
-                return Align(
-                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: EdgeInsets.only(
-                      top: 8,
-                      bottom: 8,
-                      left: isMe ? 80 : 0,
-                      right: isMe ? 0 : 80,
-                    ),
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: isMe ? Colors.greenAccent.withOpacity(0.2) : Colors.grey[800],
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: isMe ? Colors.greenAccent.withOpacity(0.3) : Colors.transparent,
-                        width: 1,
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (!isMe)
-                          Padding(
-                            padding: EdgeInsets.only(bottom: 4),
-                            child: Text(
-                              message['sender_name'] ?? 'User',
-                              style: GoogleFonts.poppins(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: Colors.greenAccent,
-                              ),
-                            ),
-                          ),
-                        Text(
-                          message['text'],
-                          style: GoogleFonts.poppins(
-                            fontSize: 14,
-                            color: isMe ? Colors.white : Colors.white,
-                          ),
-                        ),
-                        SizedBox(height: 4),
-                        Align(
-                          alignment: Alignment.bottomRight,
-                          child: Text(
-                            _formatTimestamp(message['timestamp']),
-                            style: GoogleFonts.poppins(
-                              fontSize: 10,
-                              color: Colors.grey[500],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-      ),
-      
-      // Message input
-      Container(
-        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: Colors.grey[900],
-          border: Border(
-            top: BorderSide(color: Colors.grey[800]!, width: 1),
-          ),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _messageController,
-                style: GoogleFonts.poppins(
-                  color: Colors.white,
-                ),
-                decoration: InputDecoration(
-                  hintText: 'Type a message...',
-                  hintStyle: GoogleFonts.poppins(
-                    color: Colors.grey[600],
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
-                  ),
-                  filled: true,
-                  fillColor: Colors.grey[800],
-                  contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  isDense: true,
-                ),
-                minLines: 1,
-                maxLines: 3,
-              ),
-            ),
-            SizedBox(width: 12),
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.greenAccent,
-                shape: BoxShape.circle,
-              ),
-              child: IconButton(
-                icon: Icon(Icons.send, color: Colors.black),
-                onPressed: () {
-                  if (_messageController.text.isEmpty) return;
-                  
-                  if (_currentChatId == null) {
-                    // If no chat has been initialized yet, create one
-                    _initializeSessionChat().then((_) {
-                      _sendMessage();
-                    });
-                  } else {
-                    _sendMessage();
-                  }
-                },
-                tooltip: 'Send Message',
-              ),
-            ),
-          ],
-        ),
-      ),
-    ],
-  );
 }
-
+  
   Future<void> _loadGuestSong(homie.Album album, bool play, int position) async {
   try {
     print('GUEST: Loading song ${album.name} with URL ${album.downloadUrl}');
@@ -1864,100 +887,50 @@ Widget _buildChatSection() {
 
 Future<void> _forceLoadGuestSong(homie.Album album, bool play, int position) async {
   try {
-    print('GUEST: Force loading song ${album.name}');
-    print('GUEST: URL: ${album.downloadUrl}');
+    print('GUEST: Preparing to load song ${album.name}');
     
-    if (album.downloadUrl == null || album.downloadUrl.isEmpty) {
-      print('GUEST ERROR: Invalid URL provided');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: Invalid song URL'))
-      );
-      return;
-    }
-    
-    // Show loading feedback
+    // First show loading feedback
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Loading song...'))
     );
     
-    // Update UI first for feedback
+    // Update UI immediately to show the song info
     setState(() {
       _currentSongName = album.name;
       _currentSongUrl = album.downloadUrl;
       _currentImageUrl = album.imageUrl;
       _currentArtist = album.artist;
+      _isPlaying = false; // Start in paused state
     });
     
-    // CRITICAL FIX: Reset audio player completely
-
-    // Try direct URL method first
-    try {
-      print('GUEST: Trying direct URL playback');
-   
-      print('GUEST: Direct URL method succeeded');
-      
-      setState(() { _isPlaying = true; });
-      
-      // Seek to position if needed
-      if (position > 0) {
-        await _audioService.seek(Duration(seconds: position));
-      }
-      
-      // This approach worked, so return
-      print('GUEST: Song playback setup complete via direct method');
-      return;
-    } catch (e) {
-      print('GUEST ERROR: Direct playback failed: $e');
-    }
+    // Stop previous playback
+    await _audioService.stop();
     
-    // If direct method failed, try the standard approach
-    print('GUEST: Falling back to standard playback method');
+    // Load the song but don't play yet
+    await _audioService.playSong(album);
+    print('GUEST: Song loaded and ready');
     
-    // Load with retry logic
-    bool loaded = false;
-    for (int i = 0; i < 3 && !loaded; i++) {
-      try {
-        await _audioService.playSong(album);
-        loaded = true;
-        print('GUEST: Song loaded successfully on attempt ${i+1}');
-      } catch (e) {
-        print('GUEST ERROR: Loading attempt ${i+1} failed: $e');
-        await Future.delayed(Duration(milliseconds: 800));
-      }
-    }
-    
-    if (!loaded) {
-      print('GUEST ERROR: All loading attempts failed');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load song after multiple attempts'))
+    // Tell the host we're ready
+    if (_sessionId != null) {
+      await _socialService.updateDocument(
+        collectionId: 'paired_sessions',
+        documentId: _sessionId!,
+        data: {
+          'guest_song_loaded': true,  // Add this field to track guest loading
+        },
       );
-      return;
     }
     
-    // Set playback state
-    if (play) {
-      await _audioService.play();
-      setState(() { _isPlaying = true; });
-    } else {
-      await _audioService.pause();
-      setState(() { _isPlaying = false; });
-    }
-    
-    // Set position
-    if (position > 0) {
-      await _audioService.seek(Duration(seconds: position));
-    }
-    
-    print('GUEST: Song playback setup complete');
-    
-    // Success notification
+    // Now wait for sync signal from host
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Now playing: ${album.name}'))
+      SnackBar(content: Text('Song loaded! Waiting for host to start playback...'))
     );
+    
+    // Note: We don't start playing here - we wait for the countdown event
   } catch (e) {
-    print('FATAL ERROR loading guest song: $e');
+    print('ERROR loading guest song: $e');
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Error playing song: $e'))
+      SnackBar(content: Text('Error loading song: $e')),
     );
   }
 }
@@ -1985,4 +958,208 @@ Widget _buildReloadButton() {
     );
   }
   return SizedBox.shrink(); // Return empty widget if conditions not met
-}}
+}
+
+// Add this optimization method to improve sync timing
+Future<void> _syncPlaybackPosition() async {
+  if (_sessionId == null) return;
+  
+  try {
+    // Get the latest position from the session
+    final document = await _socialService.getDocument(
+      collectionId: 'paired_sessions',
+      documentId: _sessionId!,
+    );
+    
+    final serverPosition = document.data['current_position'] ?? 0;
+    final serverIsPlaying = document.data['is_playing'] ?? false;
+    
+    // Calculate time sync offset (compensate for network delay)
+    final localPosition = _playbackPosition.toInt();
+    final positionDifference = (serverPosition - localPosition).abs();
+    
+    print('SYNC: Server position: $serverPosition, Local position: $localPosition, Diff: $positionDifference');
+    
+    // Only sync if difference is significant (>2 seconds)
+    if (positionDifference > 2) {
+      print('SYNC: Adjusting position to match server');
+      await _audioService.seek(Duration(seconds: serverPosition));
+      setState(() {
+        _playbackPosition = serverPosition.toDouble();
+      });
+    }
+    
+    // Make sure play state is in sync
+    if (_isPlaying != serverIsPlaying) {
+      print('SYNC: Adjusting play state to match server');
+      if (serverIsPlaying) {
+        await _audioService.play();
+      } else {
+        await _audioService.pause();
+      }
+      setState(() {
+        _isPlaying = serverIsPlaying;
+      });
+    }
+  } catch (e) {
+    print('Error syncing playback: $e');
+  }
+}
+
+Future<void> _playTogether() async {
+  if (!_isHost || _sessionId == null) return;
+  
+  try {
+    // Check if guest has loaded the song
+    final document = await _socialService.getDocument(
+      collectionId: 'paired_sessions',
+      documentId: _sessionId!,
+    );
+    
+    final guestReady = document.data['guest_song_loaded'] ?? false;
+    
+    if (!guestReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Waiting for guest to finish loading...'))
+      );
+      return;
+    }
+    
+    // First update session with countdown flag and current position
+    await _socialService.updateDocument(
+      collectionId: 'paired_sessions',
+      documentId: _sessionId!,
+      data: {
+        'start_countdown': true,
+        'countdown_timestamp': DateTime.now().add(Duration(seconds: 5)).toIso8601String(),
+        'current_position': _playbackPosition.toInt(),
+        'is_playing': false, // Will be set to true when countdown completes
+      },
+    );
+    
+    // Show countdown UI
+    _showCountdownOverlay(5);
+    
+    // Wait for countdown
+    await Future.delayed(Duration(seconds: 5));
+    
+    // Play together
+    await _audioService.play();
+    setState(() { 
+      _isPlaying = true;
+      _songReadyForSync = false; // Reset this flag
+    });
+    
+    // Update session
+    await _socialService.updateDocument(
+      collectionId: 'paired_sessions',
+      documentId: _sessionId!,
+      data: {
+        'start_countdown': false,
+        'is_playing': true,
+      },
+    );
+  } catch (e) {
+    print('Error in play together: $e');
+  }
+}
+
+// Add this after your play/pause button
+_buildPlayTogetherButton() {
+  if (_isHost && _songReadyForSync && _currentSongUrl != null) {
+    return Container(
+      margin: EdgeInsets.only(top: 20),
+      child: ElevatedButton.icon(
+        icon: Icon(Icons.play_circle),
+        label: Text('Play Together'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.greenAccent,
+          foregroundColor: Colors.black,
+          padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+        ),
+        onPressed: _playTogether,
+      ),
+    );
+  }
+  return SizedBox.shrink(); // Return empty widget if conditions not met
+}
+
+void _showCountdownOverlay(int seconds) {
+  // Create an overlay entry for the countdown
+  OverlayState? overlayState = Overlay.of(context);
+  OverlayEntry? entry;
+  
+  entry = OverlayEntry(
+    builder: (context) => Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        color: Colors.black.withOpacity(0.7),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Starting playback in',
+                style: GoogleFonts.poppins(
+                  fontSize: 24,
+                  color: Colors.white,
+                ),
+              ),
+              SizedBox(height: 20),
+              StreamBuilder<int>(
+                stream: Stream.periodic(Duration(seconds: 1), (i) => seconds - i - 1)
+                  .take(seconds),
+                initialData: seconds,
+                builder: (context, snapshot) {
+                  return Text(
+                    '${snapshot.data}',
+                    style: GoogleFonts.poppins(
+                      fontSize: 80,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.greenAccent,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+  
+  // Show the overlay
+  overlayState.insert(entry);
+  
+  // Remove it after the countdown
+  Future.delayed(Duration(seconds: seconds + 1), () {
+    entry?.remove();
+  });
+}
+
+// Inside your subscription handler:
+if (_isHost) {
+  // Check if guest has loaded the song
+  final guestReady = updatedDocument.data['guest_song_loaded'] ?? false;
+  if (guestReady && !_songReadyForSync && _currentSongUrl != null) {
+    setState(() {
+      _songReadyForSync = true;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Guest is ready! You can start playback.'))
+    );
+  }
+}  
+else {
+  // Guest code to handle countdown
+  if (updatedDocument.data['start_countdown'] == true) {
+    final countdownTimestamp = updatedDocument.data['countdown_timestamp'];
+    if (countdownTimestamp != null) {
+      _handleCountdown(countdownTimestamp);
+    }
+  }
+}
+}
