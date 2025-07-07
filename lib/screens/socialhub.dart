@@ -1417,12 +1417,14 @@ Widget _buildMessagesTab() {
     return 'https://cloud.appwrite.io/v1/storage/buckets/profile_pictures/files/$fileId/view?project=${AppConfig.projectId}';
   }
 
-  void _startPairedListening(UserProfile? targetUser) {
+void _startPairedListening(UserProfile? targetUser) {
   Navigator.push(
     context,
     MaterialPageRoute(
       builder: (context) => PairedListeningScreen(
-        guestUserId: targetUser?.userId,
+        sessionId: '',
+        isHost: true,
+        hostUsername: targetUser?.userId,
         guestUsername: targetUser?.displayName,
       ),
     ),
@@ -1434,7 +1436,9 @@ void _startPairedListeningWithUser(UserProfile user) {
     context,
     MaterialPageRoute(
       builder: (context) => PairedListeningScreen(
-        guestUserId: user.userId,
+        sessionId: '',
+        isHost: true,
+        hostUsername: user.userId,
         guestUsername: user.displayName,
       ),
     ),
