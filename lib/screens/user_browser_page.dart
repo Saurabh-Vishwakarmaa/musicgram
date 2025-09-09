@@ -3,7 +3,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:musicgram4/database/social_database_service.dart';
 import 'package:musicgram4/screens/profile2.dart';
 import 'package:musicgram4/social/models/user_profile.dart';
-import 'package:appwrite/models.dart';
+import 'package:appwrite/models.dart' as appwrite;
 import 'package:musicgram4/services/appwrite_service.dart';
 
 class UserBrowserPage extends StatefulWidget {

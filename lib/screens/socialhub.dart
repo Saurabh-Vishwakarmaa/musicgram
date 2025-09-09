@@ -13,7 +13,7 @@ import 'package:musicgram4/social/screens/paired_listening.dart';
 import 'package:musicgram4/social/screens/paired_listening_entry.dart';
 import 'package:musicgram4/social/widgets/activity_item.dart';
 import 'package:appwrite/appwrite.dart';
-import 'package:appwrite/models.dart';
+import 'package:appwrite/models.dart' hide Row;
 import 'package:timeago/timeago.dart' as timeago;
 
 class SocialHub extends StatefulWidget {

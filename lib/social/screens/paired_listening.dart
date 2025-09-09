@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:appwrite/models.dart';
+import 'package:appwrite/models.dart' hide Row;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -12,6 +12,8 @@ import 'package:musicgram4/services/appwrite_service.dart';
 import 'package:musicgram4/services/audio_player_service.dart';
 import 'package:musicgram4/services/appwrite_service.dart' as service;
 import 'package:musicgram4/configs/appwritecongif.dart' as config;
+import 'package:musicgram4/social/screens/song_selection_screen.dart';
+import 'package:flutter/services.dart';
 
 class PairedListeningScreen extends StatefulWidget {
   final String sessionId;
@@ -47,7 +49,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
   bool _isHost = false;
   bool _isLoading = true;
   
-  // Audio playback state
+  // My audio playback state (independent)
   String? _currentSongName;
   String? _currentSongUrl;
   String? _currentImageUrl;
@@ -55,6 +57,10 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
   bool _isPlaying = false;
   double _playbackPosition = 0.0;
   double _songDuration = 0.0;
+  
+  // Partner's playback state (display only)
+  bool _partnerIsPlaying = false;
+  double _partnerPlaybackPosition = 0.0;
   
   // User info
   String? _currentUserId;
@@ -135,19 +141,43 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         // Set partner info based on database fields
         if (_isHost) {
           _partnerUsername = document.data['guest_username'];
+          // Load partner's playback state
+          _partnerIsPlaying = document.data['guest_is_playing'] ?? false;
+          _partnerPlaybackPosition = (document.data['guest_playback_position'] ?? 0.0).toDouble();
         } else {
           _partnerUsername = document.data['host_username'];
+          // Load partner's playback state
+          _partnerIsPlaying = document.data['host_is_playing'] ?? false;
+          _partnerPlaybackPosition = (document.data['host_playback_position'] ?? 0.0).toDouble();
         }
         
-        // Load current song if exists
+        // Load current song if exists (shared between users)
         final songId = document.data['song_id'];
         if (songId != null && songId.toString().isNotEmpty) {
           _currentSongUrl = songId;
           _currentSongName = document.data['current_song_name'];
           _currentArtist = document.data['current_artist_name'];
           _currentImageUrl = document.data['album_art_url'];
-          _isPlaying = document.data['is_playing'] ?? false;
-          _playbackPosition = (document.data['playbackPosition'] ?? 0.0).toDouble();
+          
+          // Load my own playback state
+          if (_isHost) {
+            _isPlaying = document.data['host_is_playing'] ?? false;
+            _playbackPosition = (document.data['host_playback_position'] ?? 0.0).toDouble();
+          } else {
+            _isPlaying = document.data['guest_is_playing'] ?? false;
+            _playbackPosition = (document.data['guest_playback_position'] ?? 0.0).toDouble();
+          }
+          
+          // Load the song if it exists
+          if (_currentSongUrl != null && _currentSongName != null) {
+            final album = homie.Album(
+              _currentSongName!,
+              _currentSongUrl!,
+              _currentImageUrl,
+              artist: _currentArtist,
+            );
+            _loadSongSilently(album);
+          }
         }
       });
     } catch (e) {
@@ -162,7 +192,8 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         setState(() {
           _isPlaying = _audioService.isPlaying;
         });
-        _updateSessionPlayback();
+        // Update only my playback state
+        _updateMyPlaybackState();
       }
     };
 
@@ -171,13 +202,17 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         setState(() {
           _playbackPosition = position.inSeconds.toDouble();
         });
+        // Update my position periodically (every 5 seconds to reduce API calls)
+        if (_playbackPosition % 5 == 0) {
+          _updateMyPlaybackState();
+        }
       }
     };
 
     _audioService.onDurationChanged = (duration) {
-      if (mounted) {
+      if (mounted && duration != null) {
         setState(() {
-          _songDuration = duration!.inSeconds.toDouble();
+          _songDuration = duration.inSeconds.toDouble();
         });
       }
     };
@@ -188,7 +223,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
           _isPlaying = false;
           _playbackPosition = 0.0;
         });
-        _updateSessionPlayback();
+        _updateMyPlaybackState();
       }
     };
   }
@@ -231,11 +266,17 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       // Update partner info
       if (_isHost) {
         _partnerUsername = updatedDocument.data['guest_username'];
+        // Update partner's playback state
+        _partnerIsPlaying = updatedDocument.data['guest_is_playing'] ?? false;
+        _partnerPlaybackPosition = (updatedDocument.data['guest_playback_position'] ?? 0.0).toDouble();
       } else {
         _partnerUsername = updatedDocument.data['host_username'];
+        // Update partner's playback state
+        _partnerIsPlaying = updatedDocument.data['host_is_playing'] ?? false;
+        _partnerPlaybackPosition = (updatedDocument.data['host_playback_position'] ?? 0.0).toDouble();
       }
       
-      // Update current song from session
+      // Update current song from session (shared data)
       final songId = updatedDocument.data['song_id'];
       if (songId != null && songId.toString().isNotEmpty && songId != _currentSongUrl) {
         _currentSongUrl = songId;
@@ -243,7 +284,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         _currentArtist = updatedDocument.data['current_artist_name'];
         _currentImageUrl = updatedDocument.data['album_art_url'];
         
-        // Auto-load song for partner
+        // Auto-load song for partner (but don't auto-play)
         if (_currentSongUrl != null && _currentSongName != null) {
           final album = homie.Album(
             _currentSongName!,
@@ -254,230 +295,79 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
           _loadSong(album);
         }
       }
-      
-      // Update playback state
-      final isPlaying = updatedDocument.data['is_playing'] ?? false;
-      final position = (updatedDocument.data['playbackPosition'] ?? 0.0).toDouble();
-      
-      if (_isPlaying != isPlaying) {
-        _isPlaying = isPlaying;
-        if (isPlaying) {
-          _audioService.play();
-        } else {
-          _audioService.pause();
-        }
-      }
-      
-      // Update position if significant difference
-      if ((_playbackPosition - position).abs() > 3.0) {
-        _playbackPosition = position;
-        _audioService.seek(Duration(seconds: position.toInt()));
-      }
     });
   }
 
-  Future<void> _updateSessionPlayback() async {
+  // UPDATED: Only update my playback state
+  Future<void> _updateMyPlaybackState() async {
     if (_sessionId == null) return;
     
     try {
+      final updateData = <String, dynamic>{
+        'last_sync_time': DateTime.now().toIso8601String(),
+      };
+      
+      // Update my specific playback state
+      if (_isHost) {
+        updateData['host_is_playing'] = _isPlaying;
+        updateData['host_playback_position'] = _playbackPosition;
+      } else {
+        updateData['guest_is_playing'] = _isPlaying;
+        updateData['guest_playback_position'] = _playbackPosition;
+      }
+      
+      print('Updating my playback state: $updateData');
+      
       await _socialService.updateDocument(
         collectionId: 'paired_sessions',
         documentId: _sessionId!,
-        data: {
-          'current_position': _playbackPosition.toInt(),
-          'playbackPosition': _playbackPosition,
-          'is_playing': _isPlaying,
-          'last_sync_time': DateTime.now().toIso8601String(),
-        },
+        data: updateData,
       );
     } catch (e) {
-      print('Error updating session playback: $e');
+      print('Error updating my playback state: $e');
     }
   }
 
-  // NEW: Song Selection Logic
+  // Song Selection Logic (only updates shared song data)
   Future<void> _selectSong() async {
     try {
-      // Show loading indicator
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => Center(
-          child: Container(
-            padding: EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.grey[900],
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(color: Colors.greenAccent),
-                SizedBox(height: 16),
-                Text(
-                  'Loading your music...',
-                  style: GoogleFonts.poppins(
-                    color: Colors.white,
-                    fontSize: 14,
-                  ),
-                ),
-              ],
-            ),
+      HapticFeedback.lightImpact();
+      
+      // Get partner user ID from session
+      String? partnerUserId;
+      if (_session != null) {
+        partnerUserId = _isHost 
+            ? _session!['guest_user_id'] 
+            : _session!['host_user_id'];
+      }
+
+      final result = await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => SongSelectionScreen(
+            sessionId: _sessionId,
+            currentUserId: _currentUserId,
+            partnerUserId: partnerUserId,
           ),
         ),
       );
-
-      // Get user's music library
-      final userMusic = await _socialService.listDocuments(
-        collectionId: 'musics',
-        queries: [
-          Query.equal('user_id', _currentUserId!),
-          Query.orderDesc('\$createdAt'),
-        ],
-      );
-
-      // Close loading
-      Navigator.pop(context);
-
-      if (userMusic.documents.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('No songs found in your library. Upload some music first!'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        return;
-      }
-
-      // Show song selection dialog
-      final selectedSong = await _showSongSelectionDialog(userMusic.documents);
       
-      if (selectedSong != null) {
-        await _playSong(selectedSong);
+      if (result != null && result is homie.Album) {
+        await _playSong(result);
       }
     } catch (e) {
-      // Close loading if still open
-      if (Navigator.canPop(context)) {
-        Navigator.pop(context);
-      }
-      
-      print('Error selecting song: $e');
+      print('Error in song selection: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error loading music library: $e'),
+          content: Text('Error selecting song'),
           backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
         ),
       );
     }
   }
 
-  // NEW: Song Selection Dialog
-  Future<homie.Album?> _showSongSelectionDialog(List<Document> songs) async {
-    return await showDialog<homie.Album>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: Row(
-          children: [
-            Icon(Icons.queue_music, color: Colors.greenAccent),
-            SizedBox(width: 8),
-            Text(
-              'Select Song',
-              style: GoogleFonts.poppins(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-        content: Container(
-          width: double.maxFinite,
-          height: 400,
-          child: ListView.builder(
-            itemCount: songs.length,
-            itemBuilder: (context, index) {
-              final song = songs[index];
-              final data = song.data;
-              
-              return Card(
-                color: Colors.grey[800],
-                margin: EdgeInsets.only(bottom: 8),
-                child: ListTile(
-                  leading: Container(
-                    width: 50,
-                    height: 50,
-                    decoration: BoxDecoration(
-                      color: Colors.greenAccent.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: data['image_url'] != null
-                        ? ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.network(
-                              data['image_url'],
-                              fit: BoxFit.cover,
-                              errorBuilder: (context, error, stackTrace) {
-                                return Icon(
-                                  Icons.music_note,
-                                  color: Colors.greenAccent,
-                                );
-                              },
-                            ),
-                          )
-                        : Icon(
-                            Icons.music_note,
-                            color: Colors.greenAccent,
-                          ),
-                  ),
-                  title: Text(
-                    data['name'] ?? 'Unknown Song',
-                    style: GoogleFonts.poppins(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  subtitle: Text(
-                    data['artist'] ?? 'Unknown Artist',
-                    style: GoogleFonts.poppins(
-                      color: Colors.grey[400],
-                      fontSize: 12,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: Icon(
-                    Icons.play_circle_outline,
-                    color: Colors.greenAccent,
-                  ),
-                  onTap: () {
-                    final album = homie.Album(
-                      data['name'] ?? 'Unknown Song',
-                      data['download_url'] ?? '',
-                      data['image_url'],
-                      artist: data['artist'] ?? 'Unknown Artist',
-                    );
-                    Navigator.pop(context, album);
-                  },
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            child: Text('Cancel', style: TextStyle(color: Colors.grey)),
-            onPressed: () => Navigator.pop(context),
-          ),
-        ],
-      ),
-    );
-  }
-
+  // UPDATED: Only update shared song data, not playback state
   Future<void> _playSong(homie.Album album) async {
     try {
       setState(() {
@@ -485,17 +375,20 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         _currentSongUrl = album.downloadUrl;
         _currentImageUrl = album.imageUrl;
         _currentArtist = album.artist;
-      });
-      
-      await _audioService.stop();
-      await _audioService.playSong(album);
-      
-      setState(() {
         _isPlaying = false;
         _playbackPosition = 0.0;
       });
       
-      // Update session with new song info
+      // Stop current song first
+      await _audioService.stop();
+      
+      // Load and prepare the new song
+      await _audioService.playSong(album);
+      
+      // Pause immediately after loading
+      await _audioService.pause();
+      
+      // Update session with new song info (shared data only)
       await _socialService.updateDocument(
         collectionId: 'paired_sessions',
         documentId: _sessionId!,
@@ -504,16 +397,27 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
           'current_song_name': album.name,
           'current_artist_name': album.artist ?? 'Unknown Artist',
           'album_art_url': album.imageUrl,
-          'current_position': 0,
-          'playbackPosition': 0.0,
-          'is_playing': false,
           'last_sync_time': DateTime.now().toIso8601String(),
         },
       );
       
+      // Reset both users' playback states
+      final resetData = <String, dynamic>{
+        'host_is_playing': false,
+        'host_playback_position': 0.0,
+        'guest_is_playing': false,
+        'guest_playback_position': 0.0,
+      };
+      
+      await _socialService.updateDocument(
+        collectionId: 'paired_sessions',
+        documentId: _sessionId!,
+        data: resetData,
+      );
+      
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('🎵 Song loaded: ${album.name}'),
+          content: Text('🎵 Song shared: ${album.name}'),
           backgroundColor: Colors.greenAccent,
           behavior: SnackBarBehavior.floating,
         ),
@@ -522,7 +426,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       print('Error playing song: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error playing song: $e'),
+          content: Text('Error loading song: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -538,8 +442,14 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         _currentArtist = album.artist;
       });
       
+      // Stop current song first
       await _audioService.stop();
+      
+      // Load and prepare the new song
       await _audioService.playSong(album);
+      
+      // Pause immediately after loading
+      await _audioService.pause();
       
       setState(() {
         _isPlaying = false;
@@ -548,7 +458,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('🎵 Partner changed song: ${album.name}'),
+          content: Text('🎵 Partner shared: ${album.name}'),
           backgroundColor: Colors.blue,
           behavior: SnackBarBehavior.floating,
         ),
@@ -558,22 +468,61 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
     }
   }
 
-  Future<void> _togglePlayPause() async {
+  // Silent loading for initial session load
+  Future<void> _loadSongSilently(homie.Album album) async {
     try {
-      if (_isPlaying) {
-        await _audioService.pause();
-      } else {
-        await _audioService.play();
-      }
+      await _audioService.stop();
+      await _audioService.playSong(album);
+      await _audioService.pause();
       
       setState(() {
-        _isPlaying = !_isPlaying;
+        _isPlaying = false;
+        _playbackPosition = 0.0;
       });
+    } catch (e) {
+      print('Error loading song silently: $e');
+    }
+  }
+
+  // UPDATED: Only control my own playback
+  Future<void> _togglePlayPause() async {
+    if (_currentSongUrl == null || _currentSongName == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Please select a song first'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    
+    try {
+      HapticFeedback.mediumImpact();
       
-      // Update session immediately
-      await _updateSessionPlayback();
+      if (_isPlaying) {
+        await _audioService.pause();
+        setState(() {
+          _isPlaying = false;
+        });
+      } else {
+        await _audioService.play();
+        setState(() {
+          _isPlaying = true;
+        });
+      }
+      
+      // Update only my playback state
+      await _updateMyPlaybackState();
+      
+      print('My Play/Pause toggled: $_isPlaying');
     } catch (e) {
       print('Error toggling playback: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error controlling playback: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 
@@ -722,6 +671,33 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      SizedBox(height: 4),
+                      // My status indicator
+                      Container(
+                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _isPlaying ? Colors.greenAccent.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _isPlaying ? Icons.play_arrow : Icons.pause,
+                              color: _isPlaying ? Colors.greenAccent : Colors.grey,
+                              size: 12,
+                            ),
+                            SizedBox(width: 4),
+                            Text(
+                              _isPlaying ? 'Playing' : 'Paused',
+                              style: GoogleFonts.poppins(
+                                color: _isPlaying ? Colors.greenAccent : Colors.grey,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -765,6 +741,34 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      SizedBox(height: 4),
+                      // Partner's status indicator
+                      if (_partnerUsername != null)
+                        Container(
+                          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: _partnerIsPlaying ? Colors.greenAccent.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _partnerIsPlaying ? Icons.play_arrow : Icons.pause,
+                                color: _partnerIsPlaying ? Colors.greenAccent : Colors.grey,
+                                size: 12,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                _partnerIsPlaying ? 'Playing' : 'Paused',
+                                style: GoogleFonts.poppins(
+                                  color: _partnerIsPlaying ? Colors.greenAccent : Colors.grey,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -800,7 +804,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
               Icon(Icons.music_note, color: Colors.greenAccent, size: 20),
               SizedBox(width: 8),
               Text(
-                'Currently Playing',
+                'My Music Player',
                 style: GoogleFonts.poppins(
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
@@ -883,36 +887,73 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.greenAccent.withOpacity(0.2),
-                ),
-                child: IconButton(
-                  icon: Icon(
-                    _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                    color: Colors.greenAccent,
+              // Play/Pause button
+              GestureDetector(
+                onTap: _togglePlayPause,
+                child: Container(
+                  width: 64,
+                  height: 64,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _currentSongUrl != null 
+                        ? Colors.greenAccent 
+                        : Colors.grey[600],
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.greenAccent.withOpacity(0.3),
+                        blurRadius: 8,
+                        offset: Offset(0, 4),
+                      ),
+                    ],
                   ),
-                  iconSize: 48,
-                  onPressed: _togglePlayPause,
+                  child: Icon(
+                    _isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.black,
+                    size: 32,
+                  ),
                 ),
               ),
+              
               SizedBox(width: 20),
-              Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.greenAccent.withOpacity(0.2),
-                ),
-                child: IconButton(
-                  icon: Icon(Icons.queue_music, color: Colors.greenAccent),
-                  iconSize: 32,
-                  onPressed: _selectSong,
+              
+              // Song selection button
+              GestureDetector(
+                onTap: _selectSong,
+                child: Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.greenAccent.withOpacity(0.2),
+                    border: Border.all(color: Colors.greenAccent.withOpacity(0.5)),
+                  ),
+                  child: Icon(
+                    Icons.queue_music,
+                    color: Colors.greenAccent,
+                    size: 24,
+                  ),
                 ),
               ),
             ],
           ),
           
           SizedBox(height: 16),
+          
+          // Status text
+          Center(
+            child: Text(
+              _currentSongUrl != null 
+                  ? (_isPlaying ? 'Playing independently' : 'Paused - Ready to play') 
+                  : 'Select a song to start',
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: Colors.greenAccent,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          
+          SizedBox(height: 8),
           
           // Progress slider
           SliderTheme(
@@ -921,19 +962,21 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
               inactiveTrackColor: Colors.grey[700],
               thumbColor: Colors.greenAccent,
               overlayColor: Colors.greenAccent.withOpacity(0.2),
+              thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
             ),
             child: Slider(
               value: _playbackPosition.clamp(0, _songDuration),
               min: 0,
               max: _songDuration > 0 ? _songDuration : 1,
-              onChanged: (value) {
+              onChanged: _currentSongUrl != null ? (value) {
                 setState(() {
                   _playbackPosition = value;
                 });
+              } : null,
+              onChangeEnd: _currentSongUrl != null ? (value) {
                 _audioService.seek(Duration(seconds: value.toInt()));
-                // Update session with new position
-                _updateSessionPlayback();
-              },
+                _updateMyPlaybackState();
+              } : null,
             ),
           ),
           
@@ -1021,7 +1064,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              _currentSongName ?? 'No song playing',
+                              _currentSongName ?? 'No song selected',
                               style: GoogleFonts.poppins(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
@@ -1047,7 +1090,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Icon(
-                          _isPlaying ? Icons.play_arrow : Icons.pause,
+                          _partnerIsPlaying ? Icons.play_arrow : Icons.pause,
                           color: Colors.blue,
                           size: 16,
                         ),
@@ -1055,8 +1098,51 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
                     ],
                   ),
                   SizedBox(height: 12),
+                  
+                  // Partner's progress bar
+                  Column(
+                    children: [
+                      SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: Colors.blue,
+                          inactiveTrackColor: Colors.grey[700],
+                          thumbColor: Colors.blue,
+                          overlayColor: Colors.blue.withOpacity(0.2),
+                          thumbShape: RoundSliderThumbShape(enabledThumbRadius: 4),
+                        ),
+                        child: Slider(
+                          value: _partnerPlaybackPosition.clamp(0, _songDuration),
+                          min: 0,
+                          max: _songDuration > 0 ? _songDuration : 1,
+                          onChanged: null, // Read-only
+                        ),
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            _formatDuration(_partnerPlaybackPosition.toInt()),
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              color: Colors.blue,
+                            ),
+                          ),
+                          Text(
+                            _partnerIsPlaying ? 'Playing' : 'Paused',
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              color: Colors.blue,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  
+                  SizedBox(height: 8),
                   Text(
-                    'Both users share the same music session. Changes made by either user will be reflected for both.',
+                    'You both have the same song loaded, but can control playback independently.',
                     style: GoogleFonts.poppins(
                       fontSize: 12,
                       color: Colors.grey[400],

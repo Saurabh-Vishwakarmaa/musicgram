@@ -9,10 +9,10 @@ import 'package:musicgram4/social/models/activity.dart';
 import 'package:musicgram4/social/screens/chat_screen.dart';
 import 'package:musicgram4/social/screens/paired_listening.dart';
 import 'package:musicgram4/social/screens/friend_finder.dart';
-import 'package:musicgram4/services/appwrite_service.dart'; // Assuming we have this service
+import 'package:musicgram4/services/appwrite_service.dart';
 import 'package:timeago/timeago.dart' as timeago;
-import 'package:musicgram4/services/appwrite_service.dart' as apt;
- // Ensure this file contains the ProfileEditScreen class
+import 'package:flutter/services.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 // If the class is not defined, define it here as a placeholder or implement it in the correct file.
 class PairedListeningScreen extends StatelessWidget {
@@ -139,7 +139,6 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
       }
       
       // Load recent activities
-      // You'll need to implement this method in SocialDatabaseService
       final activities = await _socialService.getUserActivities(profileId);
       _recentActivities = activities.map((doc) => Activity.fromDocument(doc)).toList();
       
@@ -166,6 +165,9 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
       );
       return;
     }
+    
+    // Haptic feedback
+    HapticFeedback.mediumImpact();
     
     setState(() {
       // Show loading and optimistically update UI for better user experience
@@ -229,6 +231,9 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
   void _navigateToPairedListening() {
     if (_userProfile == null) return;
     
+    // Haptic feedback
+    HapticFeedback.mediumImpact();
+    
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -241,6 +246,11 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
   }
 
   void _navigateToEditProfile() async {
+    if (_userProfile == null) return;
+    
+    // Haptic feedback
+    HapticFeedback.lightImpact();
+    
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
@@ -260,6 +270,9 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
   void _startChat() async {
     if (AppwriteService.currentUserId == null || _userProfile == null) return;
     
+    // Haptic feedback
+    HapticFeedback.mediumImpact();
+    
     try {
       final chatService = ChatService(
         databases: AppwriteService.databases,
@@ -276,7 +289,6 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
         _userProfile!.userId,
         user1Name: UserProfile.fromDocument(currentUserProfile).displayName,
         user2Name: _userProfile!.displayName,
-        // No extra parameters here
       );
       
       Navigator.push(
@@ -304,250 +316,475 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
     if (_isLoading) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator(color: Colors.greenAccent)),
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+        ),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 50,
+                height: 50,
+                child: CircularProgressIndicator(
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.greenAccent),
+                  strokeWidth: 2,
+                ),
+              ),
+              SizedBox(height: 20),
+              Text(
+                'Loading profile...',
+                style: GoogleFonts.poppins(
+                  color: Colors.white70,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
     
     if (_userProfile == null) {
       return Scaffold(
         backgroundColor: Colors.black,
-        body: Center(child: Text('Profile not found', style: TextStyle(color: Colors.white))),
+        appBar: AppBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+        ),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.person_off_outlined, size: 64, color: Colors.white54),
+              SizedBox(height: 16),
+              Text(
+                'Profile not found',
+                style: GoogleFonts.poppins(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              SizedBox(height: 24),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.greenAccent,
+                  foregroundColor: Colors.black,
+                  padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
+                child: Text('Go Back', style: GoogleFonts.poppins()),
+              ),
+            ],
+          ),
+        ),
       );
     }
     
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: SingleChildScrollView(
+      backgroundColor: Color(0xFF121212), // Dark background
+      body: CustomScrollView(
+        physics: BouncingScrollPhysics(),
+        slivers: [
+          // Custom app bar with profile header
+          SliverAppBar(
+            expandedHeight: 320,
+            floating: false,
+            pinned: true,
+            stretch: true,
+            backgroundColor: Color(0xFF121212),
+            flexibleSpace: FlexibleSpaceBar(
+              background: _buildProfileHeader(),
+            ),
+            bottom: PreferredSize(
+              preferredSize: Size.fromHeight(48),
+              child: Container(
+                height: 48,
+                decoration: BoxDecoration(
+                  color: Color(0xFF121212),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                child: TabBar(
+                  controller: _tabController,
+                  indicator: BoxDecoration(
+                    borderRadius: BorderRadius.circular(50),
+                    color: Colors.greenAccent.withOpacity(0.2),
+                  ),
+                  indicatorSize: TabBarIndicatorSize.tab,
+                  indicatorColor: Colors.transparent,
+                  labelColor: Colors.greenAccent,
+                  unselectedLabelColor: Colors.white54,
+                  tabs: [
+                    Tab(
+                      icon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.history, size: 16),
+                          SizedBox(width: 4),
+                          Text('Activity', style: GoogleFonts.poppins(fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    Tab(
+                      icon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.music_note, size: 16),
+                          SizedBox(width: 4),
+                          Text('Artists', style: GoogleFonts.poppins(fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    Tab(
+                      icon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.headphones, size: 16),
+                          SizedBox(width: 4),
+                          Text('Sessions', style: GoogleFonts.poppins(fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          
+          // Stats summary
+          SliverToBoxAdapter(
+            child: _buildStatsSection(),
+          ),
+          
+          // Tab content
+          SliverFillRemaining(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                _buildActivityTab(),
+                _buildArtistsTab(),
+                _buildPairedSessionsTab(),
+              ],
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: !_isCurrentUser ? _buildActionButtons() : null,
+    );
+  }
+
+  Widget _buildProfileHeader() {
+    return Stack(
+      children: [
+        // Gradient background
+        Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.greenAccent.withOpacity(0.2),
+                Color(0xFF121212),
+              ],
+            ),
+          ),
+        ),
+        
+        // Profile content
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 100, 24, 0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Profile Header Section with Premium Banner
-              Stack(
+              Row(
                 children: [
+                  // Profile avatar with animated border
                   Container(
-                    height: 280,
+                    width: 100,
+                    height: 100,
                     decoration: BoxDecoration(
+                      shape: BoxShape.circle,
                       gradient: LinearGradient(
-                        colors: [Colors.purple.shade900, Colors.black],
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.greenAccent,
+                          Colors.cyanAccent,
+                          Colors.purpleAccent,
+                          Colors.greenAccent,
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
-                    child: Row(
-                      children: [
-                        CircleAvatar(
-                          radius: 50,
-                          backgroundImage: _userProfile!.avatarFileId != null
-                            ? NetworkImage(_getAvatarUrl(_userProfile!.avatarFileId!))
-                            : null,
-                          backgroundColor: const Color.fromARGB(255, 212, 212, 212),
-                          child: _userProfile!.avatarFileId == null
-                            ? Icon(Icons.person, size: 50, color: Colors.white)
-                            : null,
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _userProfile!.displayName,
-                                style: GoogleFonts.firaSansCondensed(
-                                  color: Colors.white,
-                                  fontSize: 26,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '@${_userProfile!.username}',
-                                style: GoogleFonts.firaSansCondensed(
-                                  color: Colors.white70,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
-                          ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.greenAccent.withOpacity(0.3),
+                          blurRadius: 15,
+                          spreadRadius: 2,
                         ),
                       ],
                     ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(3.0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Color(0xFF121212),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(3.0),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(50),
+                            child: _userProfile!.avatarFileId != null
+                              ? CachedNetworkImage(
+                                  imageUrl: _getAvatarUrl(_userProfile!.avatarFileId!),
+                                  placeholder: (context, url) => Container(
+                                    color: Colors.grey[900],
+                                    child: Icon(Icons.person, color: Colors.grey[700], size: 40),
+                                  ),
+                                  errorWidget: (context, url, error) => Container(
+                                    color: Colors.grey[900],
+                                    child: Icon(Icons.error, color: Colors.red[300], size: 40),
+                                  ),
+                                  fit: BoxFit.cover,
+                                )
+                              : Container(
+                                  color: Colors.grey[900],
+                                  child: Icon(Icons.person, color: Colors.grey[700], size: 40),
+                                ),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                   
-                  // Social Actions - Follow/Unfollow or Edit Profile
-                  Positioned(
-                    top: 180,
-                    right: 20,
-                    child: _isCurrentUser
-                      ? ElevatedButton.icon(
-                          icon: Icon(Icons.edit),
-                          label: Text('Edit Profile'),
-                          onPressed: _navigateToEditProfile,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.grey[800],
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(20),
-                            ),
+                  SizedBox(width: 20),
+                  
+                  // User info
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _userProfile!.displayName,
+                          style: GoogleFonts.poppins(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            letterSpacing: -0.5,
                           ),
-                        )
-                      : Row(
+                        ),
+                        SizedBox(height: 4),
+                        Row(
                           children: [
-                            ElevatedButton.icon(
-                              icon: Icon(_isFollowing ? Icons.person_remove : Icons.person_add),
-                              label: Text(_isFollowing ? 'Unfollow' : 'Follow'),
-                              onPressed: _toggleFollow,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _isFollowing ? Colors.grey[800] : Colors.purple,
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
+                            Text(
+                              '@${_userProfile!.username}',
+                              style: GoogleFonts.poppins(
+                                fontSize: 14,
+                                color: Colors.white70,
                               ),
                             ),
-                            if (!_isCurrentUser) SizedBox(width: 8),
-                            if (!_isCurrentUser)
-                              ElevatedButton.icon(
-                                icon: Icon(Icons.headset),
-                                label: Text('Listen Together'),
-                                onPressed: _navigateToPairedListening,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.greenAccent,
-                                  foregroundColor: Colors.black,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(20),
-                                  ),
+                            if (_userProfile!.id!=Null) ...[
+                              SizedBox(width: 6),
+                              Container(
+                                padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.amber,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.star, color: Colors.black, size: 10),
+                                    SizedBox(width: 2),
+                                    Text(
+                                      'PREMIUM',
+                                      style: GoogleFonts.poppins(
+                                        fontSize: 8,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.black,
+                                        letterSpacing: 0.5,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
+                            ],
                           ],
                         ),
-                  ),
-                  
-                  // Premium Badge (if applicable)
-                  // This would be based on your user data
-                  Positioned(
-                    top: 20,
-                    right: 20,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
-                      decoration: BoxDecoration(
-                        color: Colors.amber,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.amber.shade600,
-                            blurRadius: 10,
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.star, color: Colors.black, size: 16),
-                          const SizedBox(width: 5),
+                        SizedBox(height: 10),
+                        if (_userProfile!.bio != null && _userProfile!.bio!.isNotEmpty)
                           Text(
-                            'Premium',
-                            style: GoogleFonts.firaSansCondensed(
-                              color: Colors.black,
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
+                            _userProfile!.bio!,
+                            style: GoogleFonts.poppins(
+                              fontSize: 13,
+                              color: Colors.white70,
                             ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
                 ],
               ),
-
-              const SizedBox(height: 20),
-
-              // Stats Section with 3D Card Effect - Real Follow Data
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Stats',
-                      style: GoogleFonts.firaSansCondensed(
-                        fontSize: 20,
-                        color: Colors.greenAccent,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        InkWell(
-                          onTap: () {
-                            // Navigate to followers list
-                          },
-                          child: _build3DStatCard('Followers', _userProfile!.followersCount.toString()),
-                        ),
-                        InkWell(
-                          onTap: () {
-                            // Navigate to following list
-                          },
-                          child: _build3DStatCard('Following', _userProfile!.followingCount.toString()),
-                        ),
-                        _build3DStatCard('Playlists', '23'), // You'd replace this with real data
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 20),
-
-              // Tab Bar for different profile sections
-              Container(
-                color: Colors.black,
-                child: TabBar(
-                  controller: _tabController,
-                  indicatorColor: Colors.greenAccent,
-                  tabs: [
-                    Tab(text: 'Activity'),
-                    Tab(text: 'Top Artists'),
-                    Tab(text: 'Paired Sessions'),
-                  ],
-                  labelStyle: GoogleFonts.firaSansCondensed(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  unselectedLabelStyle: GoogleFonts.firaSansCondensed(
-                    fontSize: 16,
-                  ),
-                ),
-              ),
               
-              // Tab Content
-              Container(
-                height: 400, // Fixed height for tab content
-                child: TabBarView(
-                  controller: _tabController,
-                  children: [
-                    // Activity Tab
-                    _buildActivityTab(),
-                    // Top Artists Tab
-                    _buildArtistsTab(),
-                    // Paired Sessions Tab
-                    _buildPairedSessionsTab(),
-                  ],
+              SizedBox(height: 20),
+              
+              // Profile actions
+              if (_isCurrentUser)
+                ElevatedButton.icon(
+                  onPressed: _navigateToEditProfile,
+                  icon: Icon(Icons.edit, size: 16),
+                  label: Text('Edit Profile', style: GoogleFonts.poppins()),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[800],
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
                 ),
-              ),
-
-              // Future Features Section
-              const SizedBox(height: 20),
-              _buildFutureFeatureSection(),
             ],
           ),
         ),
+        
+        // Back button
+        Positioned(
+          top: 60,
+          left: 20,
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.5),
+              shape: BoxShape.circle,
+            ),
+            child: BackButton(color: Colors.white),
+          ),
+        ),
+        
+        // Menu button (if current user)
+        if (_isCurrentUser)
+          Positioned(
+            top: 60,
+            right: 20,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.5),
+                shape: BoxShape.circle,
+              ),
+              child: IconButton(
+                icon: Icon(Icons.more_vert, color: Colors.white),
+                onPressed: () {
+                  // Show options menu
+                  _showOptionsMenu();
+                },
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildStatsSection() {
+    return Container(
+      margin: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          _buildStatItem('Followers', _userProfile!.followersCount.toString()),
+          Container(height: 40, width: 1, color: Colors.grey[800]),
+          _buildStatItem('Following', _userProfile!.followingCount.toString()),
+          Container(height: 40, width: 1, color: Colors.grey[800]),
+
+        ],
       ),
+    );
+  }
+
+  Widget _buildStatItem(String label, String value) {
+    return GestureDetector(
+      onTap: () {
+        // Handle tap on stats (e.g., view followers)
+        if (label == 'Followers' || label == 'Following') {
+          HapticFeedback.lightImpact();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$label list coming soon'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      },
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: GoogleFonts.poppins(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            SizedBox(height: 4),
+            Text(
+              label,
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: Colors.white70,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActionButtons() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Message button
+        FloatingActionButton.small(
+          heroTag: 'messageBtn',
+          onPressed: _startChat,
+          backgroundColor: Colors.grey[800],
+          child: Icon(Icons.message_outlined, color: Colors.white),
+          tooltip: 'Message',
+        ),
+        SizedBox(width: 8),
+        
+        // Follow/Unfollow button
+        FloatingActionButton.extended(
+          heroTag: 'followBtn',
+          onPressed: _toggleFollow,
+          backgroundColor: _isFollowing ? Colors.grey[800] : Colors.greenAccent,
+          foregroundColor: _isFollowing ? Colors.white : Colors.black,
+          icon: Icon(_isFollowing ? Icons.person_remove_outlined : Icons.person_add_outlined, size: 20),
+          label: Text(
+            _isFollowing ? 'Unfollow' : 'Follow',
+            style: GoogleFonts.poppins(
+              fontWeight: FontWeight.w500,
+              fontSize: 14,
+            ),
+          ),
+        ),
+        SizedBox(width: 8),
+        
+        // Listen together button
+        FloatingActionButton.small(
+          heroTag: 'listenBtn',
+          onPressed: _navigateToPairedListening,
+          backgroundColor: Colors.purpleAccent,
+          child: Icon(Icons.headphones, color: Colors.white),
+          tooltip: 'Listen Together',
+        ),
+      ],
     );
   }
 
@@ -557,14 +794,32 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.music_note, size: 64, color: Colors.grey),
+            Container(
+              padding: EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.grey[900]!.withOpacity(0.5),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.history, size: 48, color: Colors.grey[600]),
+            ),
             SizedBox(height: 16),
             Text(
               'No activity yet',
-              style: GoogleFonts.firaSansCondensed(
-                fontSize: 18,
-                color: Colors.white,
+              style: GoogleFonts.poppins(
+                fontSize: 16,
+                color: Colors.white70,
               ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              _isCurrentUser
+                ? 'Start listening to music to create activity'
+                : '${_userProfile!.displayName} hasn\'t been active recently',
+              style: GoogleFonts.poppins(
+                fontSize: 12,
+                color: Colors.white38,
+              ),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -572,7 +827,7 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
+      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       itemCount: _recentActivities.length,
       itemBuilder: (context, index) {
         final activity = _recentActivities[index];
@@ -583,60 +838,103 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
 
   Widget _buildActivityItem(Activity activity) {
     IconData icon;
+    Color iconColor;
     String description;
     
     switch (activity.activityType) {
       case 'listen':
         icon = Icons.headphones;
+        iconColor = Colors.greenAccent;
         description = 'Listened to ${activity.metadata['song_name'] ?? 'a song'}';
         break;
       case 'follow':
         icon = Icons.person_add;
+        iconColor = Colors.blueAccent;
         description = 'Started following ${activity.metadata['target_name'] ?? 'someone'}';
         break;
       case 'paired_listen':
         icon = Icons.people;
+        iconColor = Colors.purpleAccent;
         description = 'Listened with ${activity.metadata['partner_name'] ?? 'a friend'}';
         break;
       default:
         icon = Icons.music_note;
+        iconColor = Colors.orangeAccent;
         description = 'Did something on MusicGram';
     }
 
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      padding: const EdgeInsets.all(12),
+      margin: EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: Colors.grey[900],
+        color: Color(0xFF1E1E1E),
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.shade800,
-            blurRadius: 8,
-            offset: Offset(-4, -4),
-          ),
-          BoxShadow(
-            color: Colors.grey.shade700,
-            blurRadius: 8,
-            offset: Offset(4, 4),
-          ),
-        ],
       ),
-      child: ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: Icon(icon, color: Colors.greenAccent),
-        title: Text(
-          description,
-          style: GoogleFonts.firaSansCondensed(
-            color: Colors.white,
-            fontSize: 14,
-          ),
-        ),
-        subtitle: Text(
-          timeago.format(activity.createdAt),
-          style: GoogleFonts.firaSansCondensed(
-            color: Colors.white70,
-            fontSize: 12,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () {
+            // Handle activity tap (e.g., open song, profile, etc.)
+            HapticFeedback.lightImpact();
+          },
+          splashColor: iconColor.withOpacity(0.1),
+          highlightColor: iconColor.withOpacity(0.05),
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: iconColor.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: iconColor, size: 20),
+                ),
+                SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        description,
+                        style: GoogleFonts.poppins(
+                          fontSize: 14,
+                          color: Colors.white,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        timeago.format(activity.createdAt),
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          color: Colors.white54,
+                        ),
+                      ),
+                      if (activity.activityType == 'listen' && 
+                          activity.metadata['artist_name'] != null) ...[
+                        SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Icon(Icons.person, size: 12, color: Colors.white54),
+                            SizedBox(width: 4),
+                            Text(
+                              activity.metadata['artist_name'],
+                              style: GoogleFonts.poppins(
+                                fontSize: 12,
+                                color: Colors.white54,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -644,42 +942,68 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
   }
 
   Widget _buildArtistsTab() {
+    // This is a placeholder - you'd populate this with real artist data
     return Padding(
-      padding: const EdgeInsets.all(16.0),
+      padding: EdgeInsets.all(16),
       child: GridView.builder(
         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: 2,
-          childAspectRatio: 1.0,
           crossAxisSpacing: 16,
           mainAxisSpacing: 16,
+          childAspectRatio: 0.8,
         ),
-        itemCount: 6, // Replace with actual artist count
+        itemCount: 6, // Replace with actual count
         itemBuilder: (context, index) {
           return Container(
             decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Colors.green.shade900, Colors.greenAccent],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+              color: Color(0xFF1E1E1E),
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
+                  color: Colors.black.withOpacity(0.2),
                   blurRadius: 10,
-                  offset: Offset(5, 5),
+                  offset: Offset(0, 5),
                 ),
               ],
             ),
-            child: Center(
-              child: Text(
-                'Artist $index',
-                style: GoogleFonts.firaSansCondensed(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () {
+                  // Open artist page
+                  HapticFeedback.lightImpact();
+                },
+                child: Column(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.grey[800],
+                          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                          image: DecorationImage(
+                            image: NetworkImage('https://picsum.photos/seed/${index + 10}/300/300'),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 1,
+                      child: Center(
+                        child: Text(
+                          'Artist ${index + 1}',
+                          style: GoogleFonts.poppins(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                textAlign: TextAlign.center,
               ),
             ),
           );
@@ -689,154 +1013,176 @@ class _ProfilePageState extends State<ProfilePage> with SingleTickerProviderStat
   }
 
   Widget _buildPairedSessionsTab() {
-    // This would show history of paired listening sessions
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.people, size: 64, color: Colors.grey),
-          SizedBox(height: 16),
-          Text(
-            'No paired sessions yet',
-            style: GoogleFonts.firaSansCondensed(
-              fontSize: 18,
-              color: Colors.white,
-            ),
-          ),
-          SizedBox(height: 16),
-          ElevatedButton.icon(
-            icon: Icon(Icons.person_add),
-            label: Text('Find Friends'),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => FriendFinder()),
-              );
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.purple,
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _build3DStatCard(String label, String value) {
-    return Container(
-      width: 100,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.grey[900],
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.grey.shade800,
-            blurRadius: 15,
-            offset: Offset(-4, -4),
-          ),
-          BoxShadow(
-            color: Colors.grey.shade700,
-            blurRadius: 15,
-            offset: Offset(4, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            value,
-            style: GoogleFonts.firaSansCondensed(
-              fontSize: 18,
-              color: Colors.greenAccent,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: GoogleFonts.firaSansCondensed(
-              fontSize: 14,
-              color: Colors.white70,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHorizontalArtistList() {
-    return Container(
-      height: 120,
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: 5,
-        itemBuilder: (context, index) {
-          return Container(
-            width: 100,
-            margin: const EdgeInsets.only(right: 16),
+          Container(
+            padding: EdgeInsets.all(24),
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                colors: [Colors.green.shade900, Colors.greenAccent],
+                colors: [Colors.purpleAccent.withOpacity(0.2), Colors.blueAccent.withOpacity(0.2)],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
-                  blurRadius: 10,
-                  offset: Offset(5, 5),
-                ),
-              ],
+              shape: BoxShape.circle,
             ),
-            child: Center(
-              child: Text(
-                'Artist $index',
-                style: GoogleFonts.firaSansCondensed(
-                  color: Colors.white,
-                  fontSize: 14,
+            child: Icon(
+              Icons.headset_mic,
+              size: 48,
+              color: Colors.purpleAccent,
+            ),
+          ),
+          SizedBox(height: 24),
+          Text(
+            'No paired sessions yet',
+            style: GoogleFonts.poppins(
+              fontSize: 18,
+              fontWeight: FontWeight.w500,
+              color: Colors.white,
+            ),
+          ),
+          SizedBox(height: 8),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              'Listen to music together with friends in real-time',
+              style: GoogleFonts.poppins(
+                fontSize: 14,
+                color: Colors.white70,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          SizedBox(height: 32),
+          if (_isCurrentUser)
+            ElevatedButton.icon(
+              icon: Icon(Icons.search, size: 18),
+              label: Text('Find Friends', style: GoogleFonts.poppins()),
+              onPressed: () {
+                HapticFeedback.lightImpact();
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => FriendFinder()),
+                );
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purpleAccent,
+                foregroundColor: Colors.white,
+                padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(20),
                 ),
-                textAlign: TextAlign.center,
               ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
 
-  Widget _buildFutureFeatureSection() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Colors.purple, Colors.pink],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
+  void _showOptionsMenu() {
+    HapticFeedback.lightImpact();
+    
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return Container(
+          padding: EdgeInsets.symmetric(vertical: 20),
+          decoration: BoxDecoration(
+            color: Color(0xFF1E1E1E),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
           ),
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.pink.withOpacity(0.5),
-              blurRadius: 10,
-              offset: Offset(5, 5),
-            ),
-          ],
-        ),
-        child: Text(
-          'Coming Soon: Premium Features like ad-free listening and high-quality streaming!',
-          style: GoogleFonts.firaSansCondensed(
-            fontSize: 16,
-            color: Colors.white,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: Colors.grey[600],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              _buildMenuOption(
+                icon: Icons.settings,
+                label: 'Settings',
+                onTap: () {
+                  Navigator.pop(context);
+                  // Navigate to settings
+                },
+              ),
+              _buildMenuOption(
+                icon: Icons.share,
+                label: 'Share Profile',
+                onTap: () {
+                  Navigator.pop(context);
+                  // Share profile
+                },
+              ),
+              _buildMenuOption(
+                icon: Icons.playlist_add,
+                label: 'Create New Playlist',
+                onTap: () {
+                  Navigator.pop(context);
+                  // Create playlist
+                },
+              ),
+              _buildMenuOption(
+                icon: Icons.star_border,
+                label: 'Upgrade to Premium',
+                onTap: () {
+                  Navigator.pop(context);
+                  // Upgrade flow
+                },
+              ),
+              SizedBox(height: 20),
+              _buildMenuOption(
+                icon: Icons.logout,
+                label: 'Log Out',
+                isDestructive: true,
+                onTap: () {
+                  Navigator.pop(context);
+                  // Log out
+                },
+              ),
+            ],
           ),
-          textAlign: TextAlign.center,
+        );
+      },
+    );
+  }
+
+  Widget _buildMenuOption({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    bool isDestructive = false,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                color: isDestructive ? Colors.redAccent : Colors.white,
+                size: 20,
+              ),
+              SizedBox(width: 16),
+              Text(
+                label,
+                style: GoogleFonts.poppins(
+                  fontSize: 16,
+                  color: isDestructive ? Colors.redAccent : Colors.white,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

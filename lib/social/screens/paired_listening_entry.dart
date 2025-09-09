@@ -6,7 +6,7 @@ import 'package:musicgram4/database/social_database_service.dart';
 import 'package:musicgram4/services/appwrite_service.dart' as service;
 import 'package:musicgram4/main.dart';
 import 'package:appwrite/appwrite.dart';
-import 'package:appwrite/models.dart';
+import 'package:appwrite/models.dart' as appwrite_models;
 import 'package:musicgram4/social/models/paired_session.dart';
 import 'package:musicgram4/social/screens/paired_listening.dart';
 import 'dart:math';

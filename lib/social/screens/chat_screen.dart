@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:appwrite/appwrite.dart';
-import 'package:appwrite/models.dart';
+import 'package:appwrite/models.dart' hide Row;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:musicgram4/social/widgets/chatbubble.dart';
 import 'package:timeago/timeago.dart' as timeago;
@@ -35,7 +35,7 @@ class ChatSearchDelegate extends SearchDelegate<Document> {
     return IconButton(
       icon: Icon(Icons.arrow_back),
       onPressed: () {
-        close(context, messages.isNotEmpty ? messages.first : Document(data: {}, $id: '', $collectionId: '', $databaseId: '', $createdAt: '', $updatedAt: '', $permissions: []));
+        close(context, messages.isNotEmpty ? messages.first : Document(data: {}, $id: '', $collectionId: '', $databaseId: '', $createdAt: '', $updatedAt: '', $permissions: [], $sequence:int.fromEnvironment("")));
       },
     );
   }
@@ -103,7 +103,7 @@ extension DocumentExt on Document {
       $createdAt: this.$createdAt,
       $updatedAt: this.$updatedAt,
       $permissions: this.$permissions,
-      data: data ?? this.data,
+      data: data ?? this.data, $sequence: int.fromEnvironment(""),
     );
   }
 }

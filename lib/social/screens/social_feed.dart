@@ -13,9 +13,9 @@ class SocialFeed extends StatefulWidget {
 
 class _SocialFeedState extends State<SocialFeed> {
   final SocialDatabaseService _socialService = SocialDatabaseService(
-    databases: databases /* provide your database instance */,
-    storage: storage /* provide your storage instance */,
-    account: account /* provide your account instance */,
+    databases: databases ,
+    storage: storage ,
+    account: account ,
   );
   
   List<Activity> _activities = [];
