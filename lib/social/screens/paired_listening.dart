@@ -147,8 +147,8 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
         } else {
           _partnerUsername = document.data['host_username'];
           // Load partner's playback state
-          _partnerIsPlaying = document.data['host_is_playing'] ?? false;
-          _partnerPlaybackPosition = (document.data['host_playback_position'] ?? 0.0).toDouble();
+          _partnerIsPlaying = document.data['isPlaying'] ?? false;
+          _partnerPlaybackPosition = (document.data['playback_position'] ?? 0.0).toDouble();
         }
         
         // Load current song if exists (shared between users)
@@ -161,11 +161,11 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
           
           // Load my own playback state
           if (_isHost) {
-            _isPlaying = document.data['host_is_playing'] ?? false;
-            _playbackPosition = (document.data['host_playback_position'] ?? 0.0).toDouble();
+            _isPlaying = document.data['isPlaying'] ?? false;
+            _playbackPosition = (document.data['playback_position'] ?? 0.0).toDouble();
           } else {
-            _isPlaying = document.data['guest_is_playing'] ?? false;
-            _playbackPosition = (document.data['guest_playback_position'] ?? 0.0).toDouble();
+            _isPlaying = document.data['is_playing'] ?? false;
+            _playbackPosition = (document.data['playback_position'] ?? 0.0).toDouble();
           }
           
           // Load the song if it exists
@@ -272,7 +272,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       } else {
         _partnerUsername = updatedDocument.data['host_username'];
         // Update partner's playback state
-        _partnerIsPlaying = updatedDocument.data['host_is_playing'] ?? false;
+        _partnerIsPlaying = updatedDocument.data['isPlaying'] ?? false;
         _partnerPlaybackPosition = (updatedDocument.data['host_playback_position'] ?? 0.0).toDouble();
       }
       
@@ -309,11 +309,11 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       
       // Update my specific playback state
       if (_isHost) {
-        updateData['host_is_playing'] = _isPlaying;
-        updateData['host_playback_position'] = _playbackPosition;
+        updateData['is_playing'] = _isPlaying;
+        updateData['playback_position'] = _playbackPosition;
       } else {
-        updateData['guest_is_playing'] = _isPlaying;
-        updateData['guest_playback_position'] = _playbackPosition;
+        updateData['is_playing'] = _isPlaying;
+        updateData['playback_position'] = _playbackPosition;
       }
       
       print('Updating my playback state: $updateData');
@@ -403,7 +403,7 @@ class _PairedListeningScreenState extends State<PairedListeningScreen> {
       
       // Reset both users' playback states
       final resetData = <String, dynamic>{
-        'host_is_playing': false,
+        'isPlaying': false,
         'host_playback_position': 0.0,
         'guest_is_playing': false,
         'guest_playback_position': 0.0,
